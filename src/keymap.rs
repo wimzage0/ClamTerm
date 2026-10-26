@@ -31,6 +31,7 @@ pub enum Cmd {
     PageDown,
     ToggleHidden,
     Home,
+    OpenExternal,
     Close,
 }
 
@@ -68,6 +69,7 @@ const PANEL: Table<Cmd> = &[
     ("page_down", Cmd::PageDown, &["pagedown"], "one page down"),
     ("toggle_hidden", Cmd::ToggleHidden, &["."], "show / hide dotfiles"),
     ("home", Cmd::Home, &["~"], "go to your home folder"),
+    ("open_external", Cmd::OpenExternal, &["p"], "open in the default app (folders: file manager)"),
     ("close", Cmd::Close, &["q", "esc", "alt+m"], "close without changing anything"),
 ];
 

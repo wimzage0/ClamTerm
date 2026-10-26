@@ -29,6 +29,7 @@ const HINTS: &[(&[Cmd], &str)] = &[
     (&[Cmd::Insert], "insert"),
     (&[Cmd::Filter], "filter"),
     (&[Cmd::ToggleHidden], "hidden"),
+    (&[Cmd::OpenExternal], "open in app"),
     (&[Cmd::Home], "home"),
     (&[Cmd::Close], "close"),
 ];

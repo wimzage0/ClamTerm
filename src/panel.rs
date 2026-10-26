@@ -27,6 +27,9 @@ pub enum Action {
     Insert(Vec<PathBuf>),
     /// Close and open this file in the user's editor.
     Edit(PathBuf),
+    /// Open this path in its default desktop app (a folder: the file
+    /// manager); the panel stays open.
+    OpenExternal(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,6 +376,8 @@ impl Panel {
             Cmd::PageDown => self.move_by(self.page.max(1) as isize),
             Cmd::ToggleHidden => self.toggle_hidden(),
             Cmd::Home => self.go_home(),
+            // Nothing highlighted (empty folder): open the folder itself.
+            Cmd::OpenExternal => return Action::OpenExternal(self.selected_path().unwrap_or_else(|| self.dir.clone())),
             Cmd::Close => return Action::Close,
         }
         Action::None
@@ -626,6 +631,22 @@ mod tests {
         p.handle_key_default(Key::alt(KeyCode::Char('j')));
         assert_eq!(p.selected().unwrap().display, "link_to_dir");
         assert_eq!(p.filter.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn p_opens_externally() {
+        let t = fixture("fm");
+        let mut p = Panel::open(t.0.clone(), false);
+        assert_eq!(p.handle_key_default(key('p')), Action::OpenExternal(t.0.join("Alpha")));
+        p.handle_key_default(key('G'));
+        assert_eq!(
+            p.handle_key_default(Key::alt(KeyCode::Char('p'))),
+            Action::OpenExternal(t.0.join("b.txt"))
+        );
+        // Empty folder: the folder itself.
+        let empty = t.0.join("zeta");
+        let mut p = Panel::open(empty.clone(), false);
+        assert_eq!(p.handle_key_default(key('p')), Action::OpenExternal(empty));
     }
 
     #[test]

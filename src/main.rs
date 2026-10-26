@@ -1,6 +1,7 @@
 //! alterm: runs $SHELL in a PTY and passes everything through, except for
 //! the hotkeys that open the file panel.
 
+mod desktop;
 mod input;
 mod keymap;
 mod panel;
@@ -253,6 +254,11 @@ impl App {
                     self.close_panel()?;
                     self.to_shell.extend_from_slice(&shell::edit_command(&rel));
                     return Ok(&data[i..]);
+                }
+                panel::Action::OpenExternal(path) => {
+                    let msg = if path.is_dir() { "opened in file manager" } else { "opened in default app" };
+                    desktop::open(path);
+                    panel.set_message(msg);
                 }
                 panel::Action::Insert(paths) => {
                     // No busy check: typing paths into a REPL or prompt is fine.

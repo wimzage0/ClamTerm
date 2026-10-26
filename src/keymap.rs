@@ -326,7 +326,8 @@ pub fn default_toml() -> String {
     let mut out = String::from(
         "# alterm keybindings: copy to ~/.config/alterm/keys.toml and edit.\n\
          # Every action takes a list of keys; [] unbinds it, and actions you leave\n\
-         # out keep their defaults. Keys: a character (\"alt+j\", \"alt+G\"), a name\n\
+         # out keep their defaults. Keys: a character with a modifier (\"alt+j\",\n\
+         # \"alt+G\", \"ctrl+u\") or a name\n\
          # (enter tab backspace delete insert esc space up down left right home end\n\
          # pageup pagedown), with optional alt+ / ctrl+ / shift+ prefixes.\n\
          # Changes apply the next time the panel opens.\n",

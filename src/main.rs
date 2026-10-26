@@ -43,7 +43,7 @@ fn main() {
 const USAGE: &str = "\
 usage: alterm [--print-keys | --keys-path | --help | --version]
 
-Runs your $SHELL with a file panel on Alt+m (Alt+o: panel with filter).
+Runs your $SHELL with a type-to-filter file panel on Alt+m.
 
   --print-keys   print a keys.toml with every binding at its default
   --keys-path    print where keys.toml is read from

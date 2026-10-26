@@ -3,7 +3,10 @@
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use std::path::{Path, PathBuf};
+
 use crate::keymap::{Cmd, Keymap};
+use crate::media::{self, Gfx, MediaKind};
 use crate::panel::{human_size, tilde_path, Entry, Kind, Panel, Preview};
 
 const RESET: &str = "\x1b[0m";
@@ -50,7 +53,7 @@ fn hints(keymap: &Keymap) -> String {
     out
 }
 
-pub fn render(panel: &mut Panel, keymap: &Keymap, rows: u16, cols: u16) -> Vec<u8> {
+pub fn render(panel: &mut Panel, keymap: &Keymap, gfx: &mut Gfx, rows: u16, cols: u16) -> Vec<u8> {
     let (rows, cols) = (rows as usize, cols as usize);
     let mut out = String::new();
     if rows == 0 || cols == 0 {
@@ -68,6 +71,7 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, rows: u16, cols: u16) -> Vec<u
     out.push_str(RESET);
     cell(&mut out, MARK, &marked, marked_width);
     if rows < 3 {
+        out.push_str(&gfx.update(None));
         return out.into_bytes();
     }
 
@@ -78,7 +82,7 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, rows: u16, cols: u16) -> Vec<u
     // Narrow terminals get the list only.
     let left = if cols >= 40 { (cols * 2 / 5).max(20) } else { cols };
     let right = cols.saturating_sub(left + 1);
-    let preview = if right > 0 { preview_lines(panel, height) } else { Vec::new() };
+    let (preview, image) = if right > 0 { preview_lines(panel, gfx, height) } else { (Vec::new(), None) };
 
     for row in 0..height {
         goto(&mut out, row + 1);
@@ -120,6 +124,18 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, rows: u16, cols: u16) -> Vec<u
     } else {
         cell(&mut out, FOOTER, &hints(keymap), cols);
     }
+
+    // The image sits under the preview's info line, inside the pane with a
+    // one-cell margin. The text pass above left those cells blank.
+    let want = image.and_then(|(png, px)| {
+        let (box_cols, box_rows) = (right.saturating_sub(2), height.saturating_sub(3));
+        if box_cols < 4 || box_rows < 2 {
+            return None;
+        }
+        let cols = media::fit_columns(px, box_cols, box_rows, gfx.cell);
+        Some(media::place(&png, left + 2, 3, cols))
+    });
+    out.push_str(&gfx.update(want));
     out.into_bytes()
 }
 
@@ -132,19 +148,74 @@ fn keep_cursor_visible(panel: &mut Panel, height: usize) {
     panel.scroll = panel.scroll.min(panel.len().saturating_sub(height));
 }
 
-fn preview_lines(panel: &mut Panel, height: usize) -> Vec<(&'static str, String)> {
-    match panel.preview() {
+type Lines = Vec<(&'static str, String)>;
+
+/// Preview text, plus an image to draw (PNG path and pixel size) if any.
+fn preview_lines(panel: &mut Panel, gfx: &Gfx, height: usize) -> (Lines, Option<(PathBuf, (u32, u32))>) {
+    let path = panel.selected_path();
+    let lines = match panel.preview() {
         None => Vec::new(),
         Some(Preview::Dir(entries)) => {
             entries.iter().take(height).map(|e| (entry_style(e), entry_label(e))).collect()
         }
-        Some(Preview::Text(lines)) => {
-            lines.iter().take(height).map(|l| ("", strip_escapes(&l.replace('\t', "    ")))).collect()
-        }
+        Some(Preview::Text(lines)) => text_lines(lines, height),
         Some(Preview::Binary(size)) => vec![(DIM, format!("binary file, {}", human_size(*size)))],
+        Some(Preview::Media { kind, size, dims, text }) => {
+            let (kind, size, dims, text) = (*kind, *size, *dims, text.clone());
+            return media_lines(&path.unwrap_or_default(), kind, size, dims, &text, gfx, height);
+        }
         Some(Preview::Empty) => vec![(DIM, "(empty)".into())],
         Some(Preview::Error(e)) => vec![(ERROR, e.clone())],
+    };
+    (lines, None)
+}
+
+fn text_lines(lines: &[String], height: usize) -> Lines {
+    lines.iter().take(height).map(|l| ("", strip_escapes(&l.replace('\t', "    ")))).collect()
+}
+
+/// Info line ("PNG image · 1920×1080 · 1.2 M"), then the image (graphics
+/// terminals) or whatever text we have (PDF text, SVG source).
+fn media_lines(
+    path: &Path,
+    kind: MediaKind,
+    size: u64,
+    dims: Option<(u32, u32)>,
+    text: &[String],
+    gfx: &Gfx,
+    height: usize,
+) -> (Lines, Option<(PathBuf, (u32, u32))>) {
+    // Images only need the worker when they'll be drawn; PDFs and videos
+    // also get their page count / duration (and PDF text) from it.
+    let wants_worker = gfx.enabled || matches!(kind, MediaKind::Pdf | MediaKind::Video);
+    let thumb = if wants_worker { gfx.thumb(path, kind) } else { Some(Ok(Default::default())) };
+
+    let mut info = vec![kind.label()];
+    if let Some((w, h)) = dims {
+        info.push(format!("{w}\u{d7}{h}"));
     }
+    info.push(human_size(size));
+    if let Some(Ok(media::Thumb { info: Some(extra), .. })) = &thumb {
+        info.push(extra.clone());
+    }
+    let mut lines: Lines = vec![(DIM, info.join(" \u{b7} ")), (DIM, String::new())];
+    let rest = height.saturating_sub(2);
+    let mut image = None;
+    match thumb {
+        None => lines.push((DIM, "loading preview\u{2026}".into())),
+        Some(Ok(t)) => match t.png {
+            // Size by the original's pixels when known: thumbnailers enlarge
+            // small images, and small images shouldn't be drawn bigger.
+            Some(png) => image = Some((png, dims.unwrap_or(t.px))),
+            None if !t.text.is_empty() => lines.extend(text_lines(&t.text, rest)),
+            None => lines.extend(text_lines(text, rest)),
+        },
+        Some(Err(e)) => {
+            lines.push((ERROR, e));
+            lines.extend(text_lines(text, rest.saturating_sub(1)));
+        }
+    }
+    (lines, image)
 }
 
 fn entry_style(e: &Entry) -> &'static str {

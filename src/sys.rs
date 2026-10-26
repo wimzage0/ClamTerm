@@ -129,6 +129,16 @@ pub fn watch_resize() -> io::Result<RawFd> {
     }
 }
 
+/// A close-on-exec pipe whose read end is non-blocking: (read, write).
+pub fn pipe() -> io::Result<(RawFd, RawFd)> {
+    let mut fds = [0; 2];
+    unsafe {
+        cvt(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC))?;
+    }
+    set_nonblocking(fds[0])?;
+    Ok((fds[0], fds[1]))
+}
+
 /// Empty a non-blocking pipe.
 pub fn drain(fd: RawFd) {
     let mut buf = [0u8; 64];

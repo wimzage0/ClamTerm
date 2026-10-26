@@ -4,6 +4,7 @@
 mod desktop;
 mod input;
 mod keymap;
+mod media;
 mod panel;
 mod pty;
 mod screen;
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use input::ShellInput;
+use media::Gfx;
 use keymap::{Keymap, ShellCmd};
 use panel::Panel;
 use screen::AltScreen;
@@ -83,9 +85,15 @@ fn run() -> io::Result<i32> {
 
     sys::install_panic_hook();
     sys::enable_raw_mode()?;
-    let mut app = App::new(pty, ws, keymap, stamp);
+    let (gfx, gfx_warning) = Gfx::new(&ws);
+    if let Some(w) = gfx_warning {
+        eprintln!("alterm: {w}");
+    }
+    let mut app = App::new(pty, ws, keymap, stamp, gfx);
     let result = app.event_loop(winch);
+    let _ = sys::write_all(sys::STDOUT, app.gfx.clear().as_bytes());
     sys::restore_terminal();
+    app.gfx.cleanup();
     if app.alt.active() {
         // The shell died under a full-screen program; don't strand the user
         // on its alternate screen.
@@ -112,13 +120,15 @@ struct App {
     keymap: Keymap,
     /// keys.toml's mtime when `keymap` was loaded, to notice edits.
     keymap_stamp: Option<SystemTime>,
+    /// Image/PDF/video previews.
+    gfx: Gfx,
 }
 
 /// The event loop should stop: the shell exited or our terminal went away.
 struct Quit;
 
 impl App {
-    fn new(pty: pty::Pty, ws: libc::winsize, keymap: Keymap, keymap_stamp: Option<SystemTime>) -> App {
+    fn new(pty: pty::Pty, ws: libc::winsize, keymap: Keymap, keymap_stamp: Option<SystemTime>, gfx: Gfx) -> App {
         App {
             pty,
             ws,
@@ -129,11 +139,14 @@ impl App {
             held: Vec::new(),
             keymap,
             keymap_stamp,
+            gfx,
         }
     }
 
     fn event_loop(&mut self, winch: RawFd) -> io::Result<()> {
         let master = self.pty.fd();
+        // Thumbnail-ready notifications; -1 makes poll ignore the slot.
+        let thumbs = self.gfx.wake_fd().unwrap_or(-1);
         let mut buf = [0u8; 8192];
 
         loop {
@@ -146,6 +159,7 @@ impl App {
                 libc::pollfd { fd: sys::STDIN, events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: master, events: master_events, revents: 0 },
                 libc::pollfd { fd: winch, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: thumbs, events: libc::POLLIN, revents: 0 },
             ];
             if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
                 let e = io::Error::last_os_error();
@@ -185,6 +199,11 @@ impl App {
             if fds[2].revents & libc::POLLIN != 0 {
                 sys::drain(winch);
                 self.resized()?;
+            }
+
+            if fds[3].revents & libc::POLLIN != 0 {
+                sys::drain(thumbs);
+                self.draw()?;
             }
         }
     }
@@ -301,6 +320,7 @@ impl App {
 
     fn close_panel(&mut self) -> io::Result<()> {
         self.panel = None;
+        sys::write_all(sys::STDOUT, self.gfx.clear().as_bytes())?;
         sys::leave_panel_screen()?;
         let held = std::mem::take(&mut self.held);
         sys::write_all(sys::STDOUT, &held)
@@ -308,7 +328,7 @@ impl App {
 
     fn draw(&mut self) -> io::Result<()> {
         if let Some(panel) = &mut self.panel {
-            sys::write_all(sys::STDOUT, &view::render(panel, &self.keymap, self.ws.ws_row, self.ws.ws_col))?;
+            sys::write_all(sys::STDOUT, &view::render(panel, &self.keymap, &mut self.gfx, self.ws.ws_row, self.ws.ws_col))?;
         }
         Ok(())
     }
@@ -316,6 +336,7 @@ impl App {
     fn resized(&mut self) -> io::Result<()> {
         if let Ok(ws) = sys::get_winsize(sys::STDIN) {
             self.ws = ws;
+            self.gfx.set_winsize(&ws);
             self.pty.resize(&ws)?;
             self.draw()?;
         }

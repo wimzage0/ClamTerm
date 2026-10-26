@@ -10,12 +10,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::input::{Key, KeyCode};
+use crate::media::{self, MediaKind};
 use crate::keymap::{Cmd, FilterCmd, Keymap};
 
 /// How many lines of a text file the preview reads.
 const PREVIEW_LINES: usize = 200;
-/// Bytes read to decide text vs binary and fill the preview.
-const PREVIEW_BYTES: usize = 32 * 1024;
+/// Bytes read to decide text vs binary and fill the preview (enough to
+/// reach a JPEG's size header past a large EXIF block).
+const PREVIEW_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -59,6 +61,9 @@ pub enum Preview {
     Dir(Vec<Entry>),
     Text(Vec<String>),
     Binary(u64),
+    /// Image, PDF or video. `text` holds the lines when the file is also
+    /// readable as text (SVG), for when it can't be drawn.
+    Media { kind: MediaKind, size: u64, dims: Option<(u32, u32)>, text: Vec<String> },
     Empty,
     Error(String),
 }
@@ -115,6 +120,13 @@ pub fn read_preview(path: &Path, is_dir: bool, show_hidden: bool) -> Preview {
     }
     if buf.is_empty() {
         return Preview::Empty;
+    }
+    if let Some(kind) = media::detect(path, &buf) {
+        let text = match std::str::from_utf8(&buf) {
+            Ok(s) if !buf.contains(&0) => s.lines().take(PREVIEW_LINES).map(str::to_owned).collect(),
+            _ => Vec::new(),
+        };
+        return Preview::Media { kind, size, dims: media::image_size(&buf), text };
     }
     if buf.contains(&0) {
         return Preview::Binary(size);

@@ -314,7 +314,7 @@ mod tests {
             s.scan(b"ab\x1bmjk", &km()),
             Scan { forward: 2, hotkey: Some((ShellCmd::OpenPanel, 4)) }
         );
-        assert_eq!(s.scan(b"\x1bo", &km()), Scan { forward: 0, hotkey: Some((ShellCmd::OpenFilter, 2)) });
+        assert_eq!(s.scan(b"\x1bo", &km()).hotkey, None); // Alt+o goes to the shell
     }
 
     #[test]

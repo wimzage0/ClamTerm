@@ -234,8 +234,8 @@ impl App {
                 let scan = self.shell_input.scan(data, &self.keymap);
                 self.to_shell.extend_from_slice(&data[..scan.forward]);
                 match scan.hotkey {
-                    Some((hotkey, end)) => {
-                        self.open_panel(hotkey)?;
+                    Some((ShellCmd::OpenPanel, end)) => {
+                        self.open_panel()?;
                         data = &data[end..];
                     }
                     None => return Ok(()),
@@ -299,8 +299,8 @@ impl App {
             .unwrap_or_else(|_| "/".into())
     }
 
-    fn open_panel(&mut self, cmd: ShellCmd) -> io::Result<()> {
-        let mut panel = Panel::open(self.shell_cwd(), cmd == ShellCmd::OpenFilter);
+    fn open_panel(&mut self) -> io::Result<()> {
+        let mut panel = Panel::open(self.shell_cwd());
         // Pick up keys.toml edits without a restart.
         let stamp = keys_stamp();
         if stamp != self.keymap_stamp {

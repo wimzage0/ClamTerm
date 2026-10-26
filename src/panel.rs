@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::input::{Key, KeyCode};
 use crate::media::{self, MediaKind};
-use crate::keymap::{Cmd, FilterCmd, Keymap};
+use crate::keymap::{Cmd, Keymap};
 
 /// How many lines of a text file the preview reads.
 const PREVIEW_LINES: usize = 200;
@@ -181,8 +181,9 @@ pub struct Panel {
     /// List height from the last render, for PgUp/PgDn.
     pub page: usize,
     pub show_hidden: bool,
-    /// `Some` while the filter prompt is active.
-    pub filter: Option<String>,
+    /// Typed text narrowing the list (case-insensitive substring); empty
+    /// shows everything. Cleared whenever the folder changes.
+    pub filter: String,
     /// Marked paths, kept across folder changes.
     pub marks: BTreeSet<PathBuf>,
     /// One-shot message for the footer, cleared by the next key.
@@ -191,7 +192,7 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn open(dir: PathBuf, filtering: bool) -> Panel {
+    pub fn open(dir: PathBuf) -> Panel {
         let mut p = Panel {
             dir: PathBuf::new(),
             entries: Vec::new(),
@@ -200,7 +201,7 @@ impl Panel {
             scroll: 0,
             page: 10,
             show_hidden: false,
-            filter: filtering.then(String::new),
+            filter: String::new(),
             marks: BTreeSet::new(),
             message: None,
             preview: None,
@@ -259,6 +260,7 @@ impl Panel {
                 self.dir = dir;
                 self.scroll = 0;
                 self.preview = None;
+                self.filter.clear();
                 self.refilter(select);
                 true
             }
@@ -276,7 +278,7 @@ impl Panel {
     /// Rebuild `view` from the filter, keeping the cursor on `keep` if it is
     /// still shown, else on the first match.
     fn refilter(&mut self, keep: Option<&OsString>) {
-        let needle = self.filter.as_deref().unwrap_or("").to_lowercase();
+        let needle = self.filter.to_lowercase();
         self.view = (0..self.entries.len())
             .filter(|&i| needle.is_empty() || self.entries[i].display.to_lowercase().contains(&needle))
             .collect();
@@ -360,14 +362,29 @@ impl Panel {
         self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
     }
 
+    /// Plain characters type into the filter and Backspace edits it (going
+    /// to the parent folder once it's empty); everything else is looked up
+    /// in the keymap.
     pub fn handle_key(&mut self, key: Key, keymap: &Keymap) -> Action {
         self.message = None;
-        if self.filter.is_some() {
-            return self.filter_key(key, keymap);
-        }
-        match keymap.panel(key) {
-            Some(cmd) => self.run(cmd),
-            None => Action::None,
+        match key.code {
+            KeyCode::Char(c) if !key.alt => {
+                self.filter.push(c);
+                self.refilter_keeping_selection();
+                Action::None
+            }
+            KeyCode::Backspace if !key.alt => {
+                if self.filter.pop().is_some() {
+                    self.refilter_keeping_selection();
+                } else {
+                    self.go_parent();
+                }
+                Action::None
+            }
+            _ => match keymap.panel(key) {
+                Some(cmd) => self.run(cmd),
+                None => Action::None,
+            },
         }
     }
 
@@ -381,7 +398,6 @@ impl Panel {
             Cmd::CdHere => return Action::Cd(self.dir.clone()),
             Cmd::Mark => self.toggle_mark(),
             Cmd::Insert => return self.insert(),
-            Cmd::Filter => self.filter = Some(String::new()),
             Cmd::Top => self.cursor = 0,
             Cmd::Bottom => self.cursor = self.view.len().saturating_sub(1),
             Cmd::PageUp => self.move_by(-(self.page.max(1) as isize)),
@@ -390,60 +406,19 @@ impl Panel {
             Cmd::Home => self.go_home(),
             // Nothing highlighted (empty folder): open the folder itself.
             Cmd::OpenExternal => return Action::OpenExternal(self.selected_path().unwrap_or_else(|| self.dir.clone())),
+            Cmd::Clear if self.filter.is_empty() => return Action::Close,
+            Cmd::Clear | Cmd::ClearText => {
+                self.filter.clear();
+                self.refilter_keeping_selection();
+            }
             Cmd::Close => return Action::Close,
         }
         Action::None
     }
 
-    /// Keys while the filter prompt is active: filter bindings first, then
-    /// plain characters type, then other panel bindings (arrows, Alt+j...).
-    fn filter_key(&mut self, key: Key, keymap: &Keymap) -> Action {
-        match keymap.filter(key) {
-            Some(FilterCmd::Accept) => return self.activate(),
-            Some(FilterCmd::Into) => self.into_folder_filtering(),
-            Some(FilterCmd::Clear) => {
-                let keep = self.selected_name();
-                self.filter = None;
-                self.refilter(keep.as_ref());
-            }
-            Some(FilterCmd::ClearText) => self.set_filter_text(String::new()),
-            None => match key.code {
-                KeyCode::Backspace if !key.alt => {
-                    let mut text = self.filter.clone().unwrap_or_default();
-                    if text.pop().is_none() {
-                        self.go_parent();
-                    } else {
-                        self.set_filter_text(text);
-                    }
-                }
-                KeyCode::Char(c) if !key.alt => {
-                    let mut text = self.filter.clone().unwrap_or_default();
-                    text.push(c);
-                    self.set_filter_text(text);
-                }
-                _ => match keymap.panel(key) {
-                    Some(Cmd::Enter) => self.into_folder_filtering(),
-                    Some(Cmd::Filter) | None => {}
-                    Some(cmd) => return self.run(cmd),
-                },
-            },
-        }
-        Action::None
-    }
-
-    fn set_filter_text(&mut self, text: String) {
-        self.filter = Some(text);
+    fn refilter_keeping_selection(&mut self) {
         let keep = self.selected_name();
         self.refilter(keep.as_ref());
-    }
-
-    /// Tab while filtering: enter the highlighted folder with a fresh filter.
-    fn into_folder_filtering(&mut self) {
-        if self.selected().map_or(false, Entry::is_dir) {
-            let path = self.selected_path().unwrap();
-            self.filter = Some(String::new());
-            self.change_dir(path, None);
-        }
     }
 }
 
@@ -508,60 +483,17 @@ mod tests {
         assert_eq!(all[0].display, ".hidden_dir");
     }
 
-    #[test]
-    fn parent_keeps_cursor_on_folder_we_came_from() {
-        let t = fixture("parent");
-        let mut p = Panel::open(t.0.clone(), false);
-        p.handle_key_default(key('j')); // beta
-        p.handle_key_default(key('l'));
-        assert_eq!(p.dir, t.0.join("beta"));
-        assert_eq!(names(&p.entries), ["inner.txt"]);
-        p.handle_key_default(Key::new(KeyCode::Backspace));
-        assert_eq!(p.dir, t.0);
-        assert_eq!(p.selected().unwrap().display, "beta");
+    fn alt(c: char) -> Key {
+        Key::alt(KeyCode::Char(c))
     }
 
-    #[test]
-    fn alt_keys_act_like_plain_keys() {
-        let t = fixture("alt");
-        let mut p = Panel::open(t.0.clone(), false);
-        p.handle_key_default(Key::alt(KeyCode::Char('j')));
-        p.handle_key_default(Key::alt(KeyCode::Char('l')));
-        assert_eq!(p.dir, t.0.join("beta"));
-        p.handle_key_default(Key::alt(KeyCode::Char('h')));
-        assert_eq!(p.dir, t.0);
-    }
-
-    #[test]
-    fn movement_is_clamped() {
-        let t = fixture("move");
-        let mut p = Panel::open(t.0.clone(), false);
-        p.handle_key_default(key('k'));
-        assert_eq!(p.cursor, 0);
-        p.handle_key_default(key('G'));
-        assert_eq!(p.selected().unwrap().display, "b.txt");
-        p.handle_key_default(key('j'));
-        assert_eq!(p.selected().unwrap().display, "b.txt");
-        p.handle_key_default(key('g'));
-        assert_eq!(p.cursor, 0);
-    }
-
-    #[test]
-    fn enter_and_c_return_cd() {
-        let t = fixture("cd");
-        let mut p = Panel::open(t.0.clone(), false);
-        assert_eq!(p.handle_key_default(Key::new(KeyCode::Enter)), Action::Cd(t.0.join("Alpha")));
-        assert_eq!(p.handle_key_default(key('c')), Action::Cd(t.0.clone()));
-        p.handle_key_default(key('G'));
-        assert_eq!(p.handle_key_default(Key::new(KeyCode::Enter)), Action::Edit(t.0.join("b.txt")));
-        assert_eq!(p.handle_key_default(key('l')), Action::Edit(t.0.join("b.txt")));
-        assert_eq!(p.handle_key_default(key('q')), Action::Close);
-        assert_eq!(p.handle_key_default(Key::alt(KeyCode::Char('m'))), Action::Close);
+    fn special(code: KeyCode) -> Key {
+        Key::new(code)
     }
 
     fn typing(p: &mut Panel, s: &str) {
         for c in s.chars() {
-            p.handle_key_default(key(c));
+            assert_eq!(p.handle_key_default(key(c)), Action::None);
         }
     }
 
@@ -570,106 +502,162 @@ mod tests {
     }
 
     #[test]
+    fn parent_keeps_cursor_on_folder_we_came_from() {
+        let t = fixture("parent");
+        let mut p = Panel::open(t.0.clone());
+        p.handle_key_default(alt('j')); // beta
+        p.handle_key_default(alt('l'));
+        assert_eq!(p.dir, t.0.join("beta"));
+        assert_eq!(names(&p.entries), ["inner.txt"]);
+        p.handle_key_default(special(KeyCode::Backspace)); // empty filter: up
+        assert_eq!(p.dir, t.0);
+        assert_eq!(p.selected().unwrap().display, "beta");
+        p.handle_key_default(special(KeyCode::Right));
+        p.handle_key_default(special(KeyCode::Left));
+        assert_eq!(p.selected().unwrap().display, "beta");
+    }
+
+    #[test]
+    fn plain_letters_filter_instead_of_acting() {
+        let t = fixture("letters");
+        let mut p = Panel::open(t.0.clone());
+        // p, j, q, i, c used to be commands; now they only narrow the list.
+        typing(&mut p, "p");
+        assert_eq!(p.filter, "p");
+        assert_eq!(shown(&p), ["Alpha"]);
+        typing(&mut p, "q");
+        assert_eq!(shown(&p), Vec::<&str>::new());
+        p.handle_key_default(special(KeyCode::Backspace));
+        p.handle_key_default(special(KeyCode::Backspace));
+        typing(&mut p, "TXT");
+        assert_eq!(shown(&p), ["A.txt", "b.txt"]);
+        typing(&mut p, " ");
+        assert_eq!(p.filter, "TXT ");
+        assert_eq!(p.len(), 0);
+    }
+
+    #[test]
+    fn movement_is_clamped() {
+        let t = fixture("move");
+        let mut p = Panel::open(t.0.clone());
+        p.handle_key_default(alt('k'));
+        assert_eq!(p.cursor, 0);
+        p.handle_key_default(alt('G'));
+        assert_eq!(p.selected().unwrap().display, "b.txt");
+        p.handle_key_default(special(KeyCode::Down));
+        assert_eq!(p.selected().unwrap().display, "b.txt");
+        p.handle_key_default(special(KeyCode::Home));
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn enter_and_alt_c_return_cd() {
+        let t = fixture("cd");
+        let mut p = Panel::open(t.0.clone());
+        assert_eq!(p.handle_key_default(special(KeyCode::Enter)), Action::Cd(t.0.join("Alpha")));
+        assert_eq!(p.handle_key_default(alt('c')), Action::Cd(t.0.clone()));
+        p.handle_key_default(special(KeyCode::End));
+        assert_eq!(p.handle_key_default(special(KeyCode::Enter)), Action::Edit(t.0.join("b.txt")));
+        assert_eq!(p.handle_key_default(alt('l')), Action::Edit(t.0.join("b.txt")));
+        assert_eq!(p.handle_key_default(alt('q')), Action::Close);
+        assert_eq!(p.handle_key_default(alt('m')), Action::Close);
+    }
+
+    #[test]
+    fn esc_clears_filter_then_closes() {
+        let t = fixture("esc");
+        let mut p = Panel::open(t.0.clone());
+        typing(&mut p, "txt");
+        p.handle_key_default(special(KeyCode::Down)); // b.txt
+        assert_eq!(p.handle_key_default(special(KeyCode::Esc)), Action::None);
+        assert_eq!(p.filter, "");
+        assert_eq!(p.len(), 6);
+        assert_eq!(p.selected().unwrap().display, "b.txt"); // selection kept
+        assert_eq!(p.handle_key_default(special(KeyCode::Esc)), Action::Close);
+        // Ctrl+U clears without closing.
+        typing(&mut p, "zz");
+        p.handle_key_default(special(KeyCode::Ctrl('u')));
+        assert_eq!(p.filter, "");
+        assert_eq!(p.handle_key_default(special(KeyCode::Ctrl('u'))), Action::None);
+    }
+
+    #[test]
+    fn filter_then_enter_or_tab() {
+        let t = fixture("tab");
+        let mut p = Panel::open(t.0.clone());
+        typing(&mut p, "bet");
+        assert_eq!(shown(&p), ["beta"]);
+        assert_eq!(p.handle_key_default(special(KeyCode::Enter)), Action::Cd(t.0.join("beta")));
+        // Tab goes in and starts a fresh filter there.
+        p.handle_key_default(special(KeyCode::Tab));
+        assert_eq!(p.dir, t.0.join("beta"));
+        assert_eq!(p.filter, "");
+        typing(&mut p, "in");
+        assert_eq!(shown(&p), ["inner.txt"]);
+        p.handle_key_default(special(KeyCode::Backspace));
+        p.handle_key_default(special(KeyCode::Backspace));
+        assert_eq!(p.dir, t.0.join("beta"));
+        p.handle_key_default(special(KeyCode::Backspace)); // empty filter: go up
+        assert_eq!(p.dir, t.0);
+        assert_eq!(p.selected().unwrap().display, "beta");
+        // No matches: Enter cds to the folder being viewed.
+        typing(&mut p, "nothing-matches");
+        assert_eq!(p.handle_key_default(special(KeyCode::Enter)), Action::Cd(t.0.clone()));
+    }
+
+    #[test]
     fn marks_and_insert() {
         let t = fixture("marks");
-        let mut p = Panel::open(t.0.clone(), false);
+        let mut p = Panel::open(t.0.clone());
         // Nothing marked: insert the highlighted entry.
-        assert_eq!(p.handle_key_default(key('i')), Action::Insert(vec![t.0.join("Alpha")]));
+        assert_eq!(p.handle_key_default(alt('i')), Action::Insert(vec![t.0.join("Alpha")]));
         // Order: Alpha beta link_to_dir zeta A.txt b.txt
-        p.handle_key_default(key(' ')); // mark Alpha, move down
+        let mark = alt(' ');
+        p.handle_key_default(mark); // mark Alpha, move down
         assert_eq!(p.selected().unwrap().display, "beta");
-        p.handle_key_default(key('G'));
-        p.handle_key_default(key(' ')); // mark b.txt (last row: stays)
-        p.handle_key_default(key('k'));
-        p.handle_key_default(key(' ')); // mark A.txt
-        p.handle_key_default(key('k'));
-        p.handle_key_default(key('k'));
-        p.handle_key_default(key(' ')); // mark zeta
-        p.handle_key_default(key('k'));
-        p.handle_key_default(key(' ')); // unmark zeta
-        assert!(!p.is_marked(p.get(3).unwrap()));
+        // Filter to the .txt files and mark both, then clear: marks survive.
+        typing(&mut p, ".txt");
+        p.handle_key_default(mark); // A.txt
+        p.handle_key_default(special(KeyCode::Ctrl(' '))); // b.txt, via ctrl+space
+        p.handle_key_default(special(KeyCode::Ctrl('u')));
         assert!(p.is_marked(p.get(0).unwrap()));
+        assert!(!p.is_marked(p.get(1).unwrap()));
+        // Toggle off and on again.
+        p.handle_key_default(special(KeyCode::Home));
+        p.handle_key_default(mark);
+        p.handle_key_default(special(KeyCode::Up));
+        p.handle_key_default(mark);
         // Marks survive entering a folder.
-        p.handle_key_default(key('g'));
-        p.handle_key_default(key('j'));
-        p.handle_key_default(key('l'));
+        p.handle_key_default(special(KeyCode::Tab)); // into beta
         assert_eq!(p.dir, t.0.join("beta"));
         assert_eq!(
-            p.handle_key_default(key('i')),
+            p.handle_key_default(alt('i')),
             Action::Insert(vec![t.0.join("A.txt"), t.0.join("Alpha"), t.0.join("b.txt")])
         );
     }
 
     #[test]
-    fn filter_narrows_case_insensitively() {
-        let t = fixture("filter");
-        let mut p = Panel::open(t.0.clone(), true);
-        typing(&mut p, "TXT");
-        assert_eq!(shown(&p), ["A.txt", "b.txt"]);
-        p.handle_key_default(Key::new(KeyCode::Down));
-        assert_eq!(p.handle_key_default(Key::new(KeyCode::Enter)), Action::Edit(t.0.join("b.txt")));
-        // Esc clears the filter and keeps the selection.
-        p.handle_key_default(Key::new(KeyCode::Esc));
-        assert!(p.filter.is_none());
-        assert_eq!(p.len(), 6);
-        assert_eq!(p.selected().unwrap().display, "b.txt");
-        // In normal mode 'j' moves; while filtering it types.
-        p.handle_key_default(key('/'));
-        typing(&mut p, "j");
-        assert_eq!(p.filter.as_deref(), Some("j"));
-        assert_eq!(p.len(), 0);
-        assert_eq!(p.handle_key_default(Key::new(KeyCode::Enter)), Action::Cd(t.0.clone()));
-    }
-
-    #[test]
-    fn filter_tab_enters_and_backspace_goes_up() {
-        let t = fixture("tab");
-        let mut p = Panel::open(t.0.clone(), true);
-        typing(&mut p, "bet");
-        assert_eq!(shown(&p), ["beta"]);
-        p.handle_key_default(Key::new(KeyCode::Tab));
-        assert_eq!(p.dir, t.0.join("beta"));
-        assert_eq!(p.filter.as_deref(), Some(""));
-        typing(&mut p, "in");
-        assert_eq!(shown(&p), ["inner.txt"]);
-        p.handle_key_default(Key::new(KeyCode::Backspace));
-        p.handle_key_default(Key::new(KeyCode::Backspace));
-        assert_eq!(p.dir, t.0.join("beta"));
-        p.handle_key_default(Key::new(KeyCode::Backspace)); // empty filter: go up
-        assert_eq!(p.dir, t.0);
-        assert_eq!(p.selected().unwrap().display, "beta");
-        assert!(p.filter.is_some());
-        // Alt+j navigates instead of typing.
-        p.handle_key_default(Key::alt(KeyCode::Char('j')));
-        assert_eq!(p.selected().unwrap().display, "link_to_dir");
-        assert_eq!(p.filter.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn p_opens_externally() {
+    fn alt_p_opens_externally() {
         let t = fixture("fm");
-        let mut p = Panel::open(t.0.clone(), false);
-        assert_eq!(p.handle_key_default(key('p')), Action::OpenExternal(t.0.join("Alpha")));
-        p.handle_key_default(key('G'));
-        assert_eq!(
-            p.handle_key_default(Key::alt(KeyCode::Char('p'))),
-            Action::OpenExternal(t.0.join("b.txt"))
-        );
+        let mut p = Panel::open(t.0.clone());
+        assert_eq!(p.handle_key_default(alt('p')), Action::OpenExternal(t.0.join("Alpha")));
+        p.handle_key_default(special(KeyCode::End));
+        assert_eq!(p.handle_key_default(alt('p')), Action::OpenExternal(t.0.join("b.txt")));
         // Empty folder: the folder itself.
         let empty = t.0.join("zeta");
-        let mut p = Panel::open(empty.clone(), false);
-        assert_eq!(p.handle_key_default(key('p')), Action::OpenExternal(empty));
+        let mut p = Panel::open(empty.clone());
+        assert_eq!(p.handle_key_default(alt('p')), Action::OpenExternal(empty));
     }
 
     #[test]
     fn hidden_toggle_keeps_selection() {
         let t = fixture("hidden");
-        let mut p = Panel::open(t.0.clone(), false);
-        p.handle_key_default(key('j'));
-        p.handle_key_default(key('.'));
+        let mut p = Panel::open(t.0.clone());
+        p.handle_key_default(alt('j'));
+        p.handle_key_default(alt('.'));
         assert_eq!(p.len(), 8);
         assert_eq!(p.selected().unwrap().display, "beta");
-        p.handle_key_default(key('.'));
+        p.handle_key_default(alt('.'));
         assert_eq!(p.len(), 6);
         assert_eq!(p.selected().unwrap().display, "beta");
     }

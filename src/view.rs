@@ -5,7 +5,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use std::path::{Path, PathBuf};
 
-use crate::keymap::{Cmd, Keymap};
+use crate::input::Key;
+use crate::keymap::{format_key, Cmd, Keymap};
 use crate::media::{self, Gfx, MediaKind};
 use crate::panel::{human_size, tilde_path, Entry, Kind, Panel, Preview};
 
@@ -27,28 +28,46 @@ const HINTS: &[(&[Cmd], &str)] = &[
     (&[Cmd::Down, Cmd::Up], "move"),
     (&[Cmd::Parent, Cmd::Enter], "out/in"),
     (&[Cmd::Activate], "cd/edit"),
+    (&[Cmd::OpenExternal], "open in app"),
     (&[Cmd::CdHere], "cd here"),
     (&[Cmd::Mark], "mark"),
     (&[Cmd::Insert], "insert"),
-    (&[Cmd::Filter], "filter"),
     (&[Cmd::ToggleHidden], "hidden"),
-    (&[Cmd::OpenExternal], "open in app"),
     (&[Cmd::Home], "home"),
-    (&[Cmd::Close], "close"),
+    (&[Cmd::Clear], "close"),
 ];
 
 /// Footer text built from the current bindings, so rebinding keeps it true.
+/// Alt bindings are grouped behind one "alt+" so the line stays short.
 fn hints(keymap: &Keymap) -> String {
-    let mut out = String::new();
+    let (mut alt, mut other) = (Vec::new(), Vec::new());
     for (cmds, label) in HINTS {
-        let keys: Vec<String> = cmds
-            .iter()
-            .filter_map(|c| keymap.key_for(*c))
-            .map(|k| if k == "enter" { "\u{23ce}".into() } else { k })
-            .collect();
-        if !keys.is_empty() {
-            out.push_str(&format!(" {} {label} ", keys.join("/")));
+        let keys: Vec<Key> = cmds.iter().filter_map(|c| keymap.first_key(*c)).collect();
+        if keys.is_empty() {
+            continue;
         }
+        let all_alt = keys.iter().all(|k| k.alt);
+        let names: Vec<String> = keys
+            .iter()
+            .map(|k| match format_key(*k) {
+                n if all_alt => n.trim_start_matches("alt+").to_string(),
+                n if n == "enter" => "\u{23ce}".into(),
+                n => n,
+            })
+            .collect();
+        let item = format!("{} {label}", names.join("/"));
+        if all_alt {
+            alt.push(item);
+        } else {
+            other.push(item);
+        }
+    }
+    let mut out = String::from(" type to filter");
+    if !alt.is_empty() {
+        out.push_str(&format!("  \u{2502} alt+ {}", alt.join("  ")));
+    }
+    if !other.is_empty() {
+        out.push_str(&format!("  \u{2502} {}", other.join("  ")));
     }
     out
 }
@@ -115,9 +134,9 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, gfx: &mut Gfx, rows: u16, cols
     goto(&mut out, rows - 1);
     if let Some(msg) = &panel.message {
         cell(&mut out, MESSAGE, &format!(" {msg}"), cols);
-    } else if let Some(f) = &panel.filter {
-        let prompt = format!(" / {f}\u{2588}");
-        let hint = format!(" {}/{}  \u{23ce} open  Tab into  Esc clear ", panel.len(), panel.total());
+    } else if !panel.filter.is_empty() {
+        let prompt = format!(" / {}\u{2588}", panel.filter);
+        let hint = format!(" {}/{}  \u{23ce} open  tab into  esc clear ", panel.len(), panel.total());
         let hint_width = UnicodeWidthStr::width(hint.as_str()).min(cols.saturating_sub(10));
         cell(&mut out, "", &prompt, cols - hint_width);
         cell(&mut out, DIM, &hint, hint_width);
@@ -337,11 +356,13 @@ mod tests {
     #[test]
     fn hints_follow_bindings() {
         let h = hints(&Keymap::default());
-        assert!(h.starts_with(" j/k move  h/l out/in  \u{23ce} cd/edit "), "{h}");
-        let (k, _) = Keymap::from_toml("[panel]\ndown = \"n\"\ninsert = []\n");
+        assert!(h.starts_with(" type to filter  \u{2502} alt+ j/k move  h/l out/in  p open in app "), "{h}");
+        assert!(h.contains("\u{2502} \u{23ce} cd/edit  esc close"), "{h}");
+        let (k, _) = Keymap::from_toml("[panel]\ndown = \"alt+n\"\ninsert = []\nclear = \"ctrl+g\"\n");
         let h = hints(&k);
-        assert!(h.starts_with(" n/k move "), "{h}");
+        assert!(h.contains("alt+ n/k move "), "{h}");
         assert!(!h.contains("insert"), "{h}");
+        assert!(h.contains("ctrl+g close"), "{h}");
     }
 
     #[test]

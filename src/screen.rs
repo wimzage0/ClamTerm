@@ -1,5 +1,5 @@
 //! Tracking whether the program in the shell is using the alternate screen
-//! (vim, less, htop...). While it is, alterm passes every key through and
+//! (vim, less, htop...). While it is, ClamTerm passes every key through and
 //! never opens the panel.
 
 /// Private modes that switch to the alternate screen.

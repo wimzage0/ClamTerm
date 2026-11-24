@@ -1,5 +1,5 @@
-//! Keybindings: the actions alterm knows, their default keys, and loading
-//! overrides from `~/.config/alterm/keys.toml`.
+//! Keybindings: the actions ClamTerm knows, their default keys, and loading
+//! overrides from `~/.config/clamterm/keys.toml`.
 
 use std::path::PathBuf;
 
@@ -10,6 +10,8 @@ use crate::tinytoml;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellCmd {
     OpenPanel,
+    /// Open the panel straight into searching visited folders.
+    Search,
 }
 
 /// File panel commands. Plain characters always type into the panel's
@@ -34,6 +36,8 @@ pub enum Cmd {
     /// Clear the filter, or close the panel when it's already empty.
     Clear,
     ClearText,
+    /// Search the folders you've visited (frecency index).
+    Search,
     Close,
 }
 
@@ -42,6 +46,7 @@ type Table<A> = &'static [(&'static str, A, &'static [&'static str], &'static st
 
 const SHELL: Table<ShellCmd> = &[
     ("open_panel", ShellCmd::OpenPanel, &["alt+m"], "open the file panel at the shell's folder"),
+    ("search", ShellCmd::Search, &["alt+r"], "open the panel searching folders you've visited"),
 ];
 
 const PANEL: Table<Cmd> = &[
@@ -62,6 +67,7 @@ const PANEL: Table<Cmd> = &[
     ("open_external", Cmd::OpenExternal, &["alt+p"], "open in the default app (folders: file manager)"),
     ("clear", Cmd::Clear, &["esc"], "clear the filter, or close if it's empty"),
     ("clear_text", Cmd::ClearText, &["ctrl+u"], "clear the filter"),
+    ("search", Cmd::Search, &["alt+r"], "search folders you've visited (again: back to browsing)"),
     ("close", Cmd::Close, &["alt+m", "alt+q"], "close without changing anything"),
 ];
 
@@ -202,7 +208,7 @@ pub fn config_path() -> Option<PathBuf> {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("alterm").join("keys.toml"))
+    Some(base.join("clamterm").join("keys.toml"))
 }
 
 /// Parse `"j"`, `"G"`, `"alt+m"`, `"ctrl+u"`, `"pagedown"`, `"shift+tab"`...
@@ -312,7 +318,7 @@ pub fn format_key(key: Key) -> String {
 }
 
 /// A complete keys.toml with every action at its default, for
-/// `alterm --print-keys`.
+/// `clamterm --print-keys`.
 pub fn default_toml() -> String {
     fn section<A>(out: &mut String, name: &str, intro: &str, table: Table<A>) {
         out.push_str(&format!("\n{intro}[{name}]\n"));
@@ -324,7 +330,7 @@ pub fn default_toml() -> String {
         }
     }
     let mut out = String::from(
-        "# alterm keybindings: copy to ~/.config/alterm/keys.toml and edit.\n\
+        "# ClamTerm keybindings: copy to ~/.config/clamterm/keys.toml and edit.\n\
          # Every action takes a list of keys; [] unbinds it, and actions you leave\n\
          # out keep their defaults. Keys: a character with a modifier (\"alt+j\",\n\
          # \"alt+G\", \"ctrl+u\") or a name\n\
@@ -394,6 +400,8 @@ mod tests {
         assert_eq!(k.panel(Key::new(Tab)), Some(Cmd::Enter));
         assert_eq!(k.panel(Key::new(Esc)), Some(Cmd::Clear));
         assert_eq!(k.panel(Key::alt(Char('m'))), Some(Cmd::Close));
+        assert_eq!(k.panel(Key::alt(Char('r'))), Some(Cmd::Search));
+        assert_eq!(k.shell(Key::alt(Char('r'))), Some(ShellCmd::Search));
         // Plain characters are never panel commands: they type into the filter.
         for c in "jkhlpcigG.~mq /".chars() {
             assert_eq!(k.panel(Key::new(Char(c))), None, "{c:?}");

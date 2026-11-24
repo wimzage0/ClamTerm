@@ -9,6 +9,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::dirindex::{self, Candidates};
 use crate::input::{Key, KeyCode};
 use crate::media::{self, MediaKind};
 use crate::keymap::{Cmd, Keymap};
@@ -32,7 +33,13 @@ pub enum Action {
     /// Open this path in its default desktop app (a folder: the file
     /// manager); the panel stays open.
     OpenExternal(PathBuf),
+    /// Switch to searching visited folders: the caller supplies the
+    /// candidates with `enter_search`.
+    StartSearch,
 }
+
+/// Most search results shown at once.
+const SEARCH_LIMIT: usize = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -49,6 +56,8 @@ pub struct Entry {
     pub display: String,
     pub kind: Kind,
     pub executable: bool,
+    /// Search results only: the folder's frecency in the visit index.
+    pub weight: Option<f64>,
 }
 
 impl Entry {
@@ -94,7 +103,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
             };
             let executable =
                 !target_dir && meta.map_or(false, |m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-            Some(Entry { name, display, kind, executable })
+            Some(Entry { name, display, kind, executable, weight: None })
         })
         .collect();
     entries.sort_by_cached_key(|e| (!e.is_dir(), e.display.to_lowercase(), e.display.clone()));
@@ -188,6 +197,12 @@ pub struct Panel {
     pub marks: BTreeSet<PathBuf>,
     /// One-shot message for the footer, cleared by the next key.
     pub message: Option<String>,
+    /// `Some` while searching visited folders instead of listing `dir`.
+    /// The list then holds the best matches, named by absolute path (which
+    /// `dir.join` leaves as is, so paths, marks and previews just work).
+    search: Option<Candidates>,
+    /// Folders entered while browsing, for the caller to index.
+    visits: Vec<PathBuf>,
     preview: Option<(PathBuf, Preview)>,
 }
 
@@ -204,6 +219,8 @@ impl Panel {
             filter: String::new(),
             marks: BTreeSet::new(),
             message: None,
+            search: None,
+            visits: Vec::new(),
             preview: None,
         };
         p.change_dir(dir, None);
@@ -220,9 +237,36 @@ impl Panel {
         self.view.get(i).map(|&j| &self.entries[j])
     }
 
-    /// Entries in `dir` before filtering.
+    /// Entries before filtering: in `dir`, or folders in the index.
     pub fn total(&self) -> usize {
-        self.entries.len()
+        match &self.search {
+            Some(c) => c.len(),
+            None => self.entries.len(),
+        }
+    }
+
+    pub fn in_search(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Show search results from `candidates` (see `Action::StartSearch`).
+    pub fn enter_search(&mut self, candidates: Candidates) {
+        self.search = Some(candidates);
+        self.filter.clear();
+        self.scroll = 0;
+        self.preview = None;
+        self.refilter(None);
+    }
+
+    /// Back to listing the folder that was open before searching.
+    fn leave_search(&mut self) {
+        let dir = self.dir.clone();
+        self.change_dir(dir, None);
+    }
+
+    /// Folders entered since the last call, for the visit index.
+    pub fn take_visits(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.visits)
     }
 
     pub fn selected(&self) -> Option<&Entry> {
@@ -256,6 +300,10 @@ impl Panel {
     fn change_dir(&mut self, dir: PathBuf, select: Option<&OsString>) -> bool {
         match list_dir(&dir, self.show_hidden) {
             Ok(entries) => {
+                if dir != self.dir && !self.dir.as_os_str().is_empty() {
+                    self.visits.push(dir.clone());
+                }
+                self.search = None;
                 self.entries = entries;
                 self.dir = dir;
                 self.scroll = 0;
@@ -278,7 +326,19 @@ impl Panel {
     /// Rebuild `view` from the filter, keeping the cursor on `keep` if it is
     /// still shown, else on the first match.
     fn refilter(&mut self, keep: Option<&OsString>) {
-        let needle = self.filter.to_lowercase();
+        if let Some(candidates) = &self.search {
+            self.entries = dirindex::search(candidates, &self.filter, SEARCH_LIMIT)
+                .into_iter()
+                .map(|(path, weight)| Entry {
+                    display: tilde_path(&path),
+                    name: path.into_os_string(),
+                    kind: Kind::Dir,
+                    executable: false,
+                    weight: Some(weight),
+                })
+                .collect();
+        }
+        let needle = if self.search.is_some() { String::new() } else { self.filter.to_lowercase() };
         self.view = (0..self.entries.len())
             .filter(|&i| needle.is_empty() || self.entries[i].display.to_lowercase().contains(&needle))
             .collect();
@@ -376,6 +436,8 @@ impl Panel {
             KeyCode::Backspace if !key.alt => {
                 if self.filter.pop().is_some() {
                     self.refilter_keeping_selection();
+                } else if self.in_search() {
+                    self.leave_search();
                 } else {
                     self.go_parent();
                 }
@@ -389,6 +451,11 @@ impl Panel {
     }
 
     fn run(&mut self, cmd: Cmd) -> Action {
+        if self.in_search() {
+            if let Some(action) = self.run_in_search(cmd) {
+                return action;
+            }
+        }
         match cmd {
             Cmd::Down => self.move_by(1),
             Cmd::Up => self.move_by(-1),
@@ -411,13 +478,47 @@ impl Panel {
                 self.filter.clear();
                 self.refilter_keeping_selection();
             }
+            Cmd::Search => return Action::StartSearch,
             Cmd::Close => return Action::Close,
         }
         Action::None
     }
 
+    /// Commands that mean something different on search results; `None`
+    /// falls through to the normal handling (moving, marks, Alt+p...).
+    fn run_in_search(&mut self, cmd: Cmd) -> Option<Action> {
+        let selected = self.selected_path();
+        Some(match cmd {
+            // A folder from the results: cd there (nothing to do without one).
+            Cmd::Activate | Cmd::CdHere => selected.map_or(Action::None, Action::Cd),
+            // Browse into it.
+            Cmd::Enter => {
+                if let Some(dir) = selected {
+                    self.change_dir(dir, None);
+                }
+                Action::None
+            }
+            Cmd::Search | Cmd::Parent => {
+                self.leave_search();
+                Action::None
+            }
+            Cmd::Clear if self.filter.is_empty() => {
+                self.leave_search();
+                Action::None
+            }
+            Cmd::Home => {
+                self.go_home();
+                Action::None
+            }
+            Cmd::ToggleHidden => Action::None,
+            _ => return None,
+        })
+    }
+
+    /// After the filter changes. Search results re-rank, so the cursor goes
+    /// to the best match; a folder listing keeps the highlighted entry.
     fn refilter_keeping_selection(&mut self) {
-        let keep = self.selected_name();
+        let keep = if self.in_search() { None } else { self.selected_name() };
         self.refilter(keep.as_ref());
     }
 }
@@ -432,7 +533,7 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> TempDir {
-            let p = std::env::temp_dir().join(format!("alterm-test-{tag}-{}", std::process::id()));
+            let p = std::env::temp_dir().join(format!("clamterm-test-{tag}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&p);
             fs::create_dir_all(&p).unwrap();
             TempDir(p)
@@ -647,6 +748,86 @@ mod tests {
         let empty = t.0.join("zeta");
         let mut p = Panel::open(empty.clone());
         assert_eq!(p.handle_key_default(alt('p')), Action::OpenExternal(empty));
+    }
+
+    #[test]
+    fn search_mode_lists_ranked_visited_folders() {
+        let t = fixture("search");
+        let (alpha, beta, zeta) = (t.0.join("Alpha"), t.0.join("beta"), t.0.join("zeta"));
+        let mut p = Panel::open(t.0.join("beta"));
+        assert_eq!(p.handle_key_default(alt('r')), Action::StartSearch);
+        p.enter_search(vec![(zeta.clone(), 9.0), (alpha.clone(), 5.0), (beta.clone(), 1.0)]);
+        assert!(p.in_search());
+        assert_eq!(p.total(), 3);
+        assert_eq!(p.selected_path(), Some(zeta.clone())); // best first
+        assert_eq!(p.selected().unwrap().weight, Some(9.0));
+        // The cursor follows the best match as you type, even when the
+        // highlighted folder still matches: "a" matches all three, and
+        // zeta's own name contains it but Alpha's starts with it.
+        p.handle_key_default(special(KeyCode::Down)); // move off the top
+        typing(&mut p, "a");
+        assert_eq!(p.cursor, 0);
+        assert_eq!(p.selected_path(), Some(alpha.clone()));
+        p.handle_key_default(special(KeyCode::Backspace));
+        // Typing re-ranks: "alp" only matches Alpha.
+        typing(&mut p, "alp");
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.selected_path(), Some(alpha.clone()));
+        assert!(p.selected().unwrap().is_dir());
+        // Enter cds there; Alt+c too.
+        assert_eq!(p.handle_key_default(special(KeyCode::Enter)), Action::Cd(alpha.clone()));
+        assert_eq!(p.handle_key_default(alt('c')), Action::Cd(alpha.clone()));
+        // Nothing matching: Enter does nothing (no surprise cd).
+        typing(&mut p, "zzz");
+        assert_eq!(p.handle_key_default(special(KeyCode::Enter)), Action::None);
+    }
+
+    #[test]
+    fn leaving_search_and_browsing_results() {
+        let t = fixture("search2");
+        let alpha = t.0.join("Alpha");
+        let start = t.0.join("beta");
+        let mut p = Panel::open(start.clone());
+        let cands = vec![(alpha.clone(), 2.0)];
+        // Tab browses into a result, as a normal folder listing.
+        p.enter_search(cands.clone());
+        p.handle_key_default(special(KeyCode::Tab));
+        assert!(!p.in_search());
+        assert_eq!(p.dir, alpha);
+        assert_eq!(p.take_visits(), [alpha.clone()]);
+        assert!(p.take_visits().is_empty());
+        // Esc clears the query, then goes back to the folder we were in.
+        p.handle_key_default(special(KeyCode::Left)); // back to the fixture root
+        p.take_visits();
+        p.enter_search(cands.clone());
+        typing(&mut p, "al");
+        p.handle_key_default(special(KeyCode::Esc));
+        assert!(p.in_search());
+        assert_eq!(p.handle_key_default(special(KeyCode::Esc)), Action::None);
+        assert!(!p.in_search());
+        assert_eq!(p.dir, t.0);
+        assert!(p.take_visits().is_empty()); // returning isn't a visit
+        // Backspace on an empty query and Alt+r again also leave search.
+        p.enter_search(cands.clone());
+        p.handle_key_default(special(KeyCode::Backspace));
+        assert!(!p.in_search());
+        p.enter_search(cands);
+        p.handle_key_default(alt('r'));
+        assert!(!p.in_search());
+        assert_eq!(p.dir, t.0);
+    }
+
+    #[test]
+    fn marks_and_insert_work_on_results() {
+        let t = fixture("search3");
+        let (alpha, zeta) = (t.0.join("Alpha"), t.0.join("zeta"));
+        let mut p = Panel::open(t.0.clone());
+        p.enter_search(vec![(alpha.clone(), 2.0), (zeta.clone(), 1.0)]);
+        p.handle_key_default(alt(' '));
+        p.handle_key_default(alt(' '));
+        assert_eq!(p.handle_key_default(alt('i')), Action::Insert(vec![alpha.clone(), zeta]));
+        assert_eq!(p.handle_key_default(special(KeyCode::Home)), Action::None);
+        assert_eq!(p.handle_key_default(alt('p')), Action::OpenExternal(alpha));
     }
 
     #[test]

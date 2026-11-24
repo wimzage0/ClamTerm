@@ -1,7 +1,8 @@
-//! alterm: runs $SHELL in a PTY and passes everything through, except for
+//! ClamTerm: runs $SHELL in a PTY and passes everything through, except for
 //! the hotkeys that open the file panel.
 
 mod desktop;
+mod dirindex;
 mod input;
 mod keymap;
 mod media;
@@ -16,8 +17,9 @@ mod view;
 use std::io;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
+use dirindex::DirIndex;
 use input::ShellInput;
 use media::Gfx;
 use keymap::{Keymap, ShellCmd};
@@ -27,13 +29,18 @@ use screen::AltScreen;
 /// Most shell output we hold while the panel is open; beyond this the oldest
 /// bytes are dropped (a runaway command shouldn't eat all memory).
 const MAX_HELD_OUTPUT: usize = 8 << 20;
+/// How often (at most) to look at the shell's folder while it prints.
+const CWD_CHECK_EVERY: Duration = Duration::from_millis(500);
+/// Visit weights: a shell cd counts fully, browsing in the panel half.
+const SHELL_VISIT: f64 = 1.0;
+const PANEL_VISIT: f64 = 0.5;
 
 fn main() {
     let code = match run() {
         Ok(code) => code,
         Err(e) => {
             sys::restore_terminal();
-            eprintln!("alterm: {e}");
+            eprintln!("clamterm: {e}");
             1
         }
     };
@@ -41,9 +48,10 @@ fn main() {
 }
 
 const USAGE: &str = "\
-usage: alterm [--print-keys | --keys-path | --help | --version]
+usage: clamterm [--print-keys | --keys-path | --help | --version]
 
-Runs your $SHELL with a type-to-filter file panel on Alt+m.
+Runs your $SHELL with a type-to-filter file panel on Alt+m, and a search of
+the folders you've visited on Alt+r.
 
   --print-keys   print a keys.toml with every binding at its default
   --keys-path    print where keys.toml is read from
@@ -58,9 +66,9 @@ fn run() -> io::Result<i32> {
                 None => return Err(io::Error::new(io::ErrorKind::NotFound, "no $HOME or $XDG_CONFIG_HOME")),
             },
             "-h" | "--help" => print!("{USAGE}"),
-            "-V" | "--version" => println!("alterm {}", env!("CARGO_PKG_VERSION")),
+            "-V" | "--version" => println!("clamterm {}", env!("CARGO_PKG_VERSION")),
             _ => {
-                eprint!("alterm: unknown argument {arg:?}\n{USAGE}");
+                eprint!("clamterm: unknown argument {arg:?}\n{USAGE}");
                 return Ok(2);
             }
         }
@@ -76,7 +84,7 @@ fn run() -> io::Result<i32> {
     let stamp = keys_stamp();
     let (keymap, warnings) = Keymap::load();
     for w in &warnings {
-        eprintln!("alterm: {w}");
+        eprintln!("clamterm: {w}");
     }
 
     let pty = pty::spawn(&shell, &ws)?;
@@ -87,10 +95,11 @@ fn run() -> io::Result<i32> {
     sys::enable_raw_mode()?;
     let (gfx, gfx_warning) = Gfx::new(&ws);
     if let Some(w) = gfx_warning {
-        eprintln!("alterm: {w}");
+        eprintln!("clamterm: {w}");
     }
     let mut app = App::new(pty, ws, keymap, stamp, gfx);
     let result = app.event_loop(winch);
+    let _ = app.index.save();
     let _ = sys::write_all(sys::STDOUT, app.gfx.clear().as_bytes());
     sys::restore_terminal();
     app.gfx.cleanup();
@@ -122,6 +131,14 @@ struct App {
     keymap_stamp: Option<SystemTime>,
     /// Image/PDF/video previews.
     gfx: Gfx,
+    /// Visited folders, for Alt+r.
+    index: DirIndex,
+    /// The shell's folder when last checked, and when that was.
+    last_cwd: Option<PathBuf>,
+    last_cwd_check: Option<Instant>,
+    /// Output arrived while a check was too recent: check once more when
+    /// `CWD_CHECK_EVERY` has passed, so a quick cd isn't missed.
+    cwd_recheck: bool,
 }
 
 /// The event loop should stop: the shell exited or our terminal went away.
@@ -140,6 +157,10 @@ impl App {
             keymap,
             keymap_stamp,
             gfx,
+            index: DirIndex::load(),
+            last_cwd: None,
+            last_cwd_check: None,
+            cwd_recheck: false,
         }
     }
 
@@ -161,7 +182,7 @@ impl App {
                 libc::pollfd { fd: winch, events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: thumbs, events: libc::POLLIN, revents: 0 },
             ];
-            if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
+            if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, self.poll_timeout()) } < 0 {
                 let e = io::Error::last_os_error();
                 if e.kind() == io::ErrorKind::Interrupted {
                     continue;
@@ -205,11 +226,16 @@ impl App {
                 sys::drain(thumbs);
                 self.draw()?;
             }
+
+            if self.cwd_recheck {
+                self.note_shell_cwd();
+            }
         }
     }
 
     fn shell_output(&mut self, data: &[u8]) -> io::Result<()> {
         self.alt.feed(data);
+        self.note_shell_cwd();
         if self.panel.is_some() {
             self.held.extend_from_slice(data);
             if self.held.len() > MAX_HELD_OUTPUT {
@@ -234,8 +260,11 @@ impl App {
                 let scan = self.shell_input.scan(data, &self.keymap);
                 self.to_shell.extend_from_slice(&data[..scan.forward]);
                 match scan.hotkey {
-                    Some((ShellCmd::OpenPanel, end)) => {
+                    Some((cmd, end)) => {
                         self.open_panel()?;
+                        if cmd == ShellCmd::Search {
+                            self.start_search()?;
+                        }
                         data = &data[end..];
                     }
                     None => return Ok(()),
@@ -253,8 +282,14 @@ impl App {
             let (key, n) = input::parse_key(&data[i..]);
             i += n;
             let panel = self.panel.as_mut().expect("panel is open");
-            match panel.handle_key(key, &self.keymap) {
+            let action = panel.handle_key(key, &self.keymap);
+            let now = dirindex::now();
+            for dir in panel.take_visits() {
+                self.index.visit(&dir, PANEL_VISIT, now);
+            }
+            match action {
                 panel::Action::None => {}
+                panel::Action::StartSearch => self.start_search()?,
                 panel::Action::Close => {
                     self.close_panel()?;
                     return Ok(&data[i..]);
@@ -300,6 +335,9 @@ impl App {
     }
 
     fn open_panel(&mut self) -> io::Result<()> {
+        // Catch a cd that happened just now, before the next check was due.
+        self.last_cwd_check = None;
+        self.note_shell_cwd();
         let mut panel = Panel::open(self.shell_cwd());
         // Pick up keys.toml edits without a restart.
         let stamp = keys_stamp();
@@ -310,7 +348,7 @@ impl App {
             panel.set_message(match warnings.len() {
                 0 => "reloaded keys.toml".to_string(),
                 1 => warnings[0].clone(),
-                n => format!("{} (+{} more; run alterm --print-keys for the format)", warnings[0], n - 1),
+                n => format!("{} (+{} more; run clamterm --print-keys for the format)", warnings[0], n - 1),
             });
         }
         self.panel = Some(panel);
@@ -320,10 +358,48 @@ impl App {
 
     fn close_panel(&mut self) -> io::Result<()> {
         self.panel = None;
+        let _ = self.index.save();
         sys::write_all(sys::STDOUT, self.gfx.clear().as_bytes())?;
         sys::leave_panel_screen()?;
         let held = std::mem::take(&mut self.held);
         sys::write_all(sys::STDOUT, &held)
+    }
+
+    /// Switch the open panel to searching visited folders, first merging in
+    /// what other ClamTerm windows have saved.
+    fn start_search(&mut self) -> io::Result<()> {
+        let _ = self.index.save();
+        let candidates = self.index.candidates(dirindex::now());
+        if let Some(panel) = &mut self.panel {
+            panel.enter_search(candidates);
+        }
+        self.draw()
+    }
+
+    /// Poll timeout in ms: wake for a pending folder re-check, else wait.
+    fn poll_timeout(&self) -> libc::c_int {
+        match (self.cwd_recheck, self.last_cwd_check) {
+            (true, Some(t)) => CWD_CHECK_EVERY.saturating_sub(t.elapsed()).as_millis() as libc::c_int + 1,
+            _ => -1,
+        }
+    }
+
+    /// Index the shell's folder when it changes. Checked as the shell prints
+    /// (a cd is followed by a new prompt), at most every `CWD_CHECK_EVERY`,
+    /// with one follow-up check when output came in between.
+    fn note_shell_cwd(&mut self) {
+        if self.last_cwd_check.map_or(false, |t| t.elapsed() < CWD_CHECK_EVERY) {
+            self.cwd_recheck = true;
+            return;
+        }
+        self.cwd_recheck = false;
+        self.last_cwd_check = Some(Instant::now());
+        let Ok(cwd) = self.pty.cwd() else { return };
+        if self.last_cwd.as_ref() != Some(&cwd) {
+            self.index.visit(&cwd, SHELL_VISIT, dirindex::now());
+            let _ = self.index.save();
+            self.last_cwd = Some(cwd);
+        }
     }
 
     fn draw(&mut self) -> io::Result<()> {

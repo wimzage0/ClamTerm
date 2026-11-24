@@ -135,10 +135,10 @@ pub fn image_size(b: &[u8]) -> Option<(u32, u32)> {
 // Terminal graphics
 
 /// Whether the outer terminal speaks the kitty graphics protocol.
-/// `ALTERM_IMAGES=0` / `=1` overrides the guess.
+/// `CLAMTERM_IMAGES=0` / `=1` overrides the guess.
 pub fn graphics_supported() -> bool {
     let var = |k: &str| std::env::var(k).unwrap_or_default();
-    match var("ALTERM_IMAGES").as_str() {
+    match var("CLAMTERM_IMAGES").as_str() {
         "0" | "off" | "no" => return false,
         "1" | "on" | "yes" => return true,
         _ => {}
@@ -308,7 +308,7 @@ impl Thumbnailer {
     /// info and PDF text). Thumbnails live in a private per-process folder.
     pub fn new(graphics: bool) -> io::Result<Thumbnailer> {
         let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let dir = base.join(format!("alterm-{}", std::process::id()));
+        let dir = base.join(format!("clamterm-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         let (wake, wake_tx) = sys::pipe()?;
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn real_files_from_ffmpeg() {
         // Cross-check the header parsers against real encoder output.
-        let dir = std::env::temp_dir().join(format!("alterm-media-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("clamterm-media-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for ext in ["png", "jpg", "gif", "bmp", "webp"] {
             let f = dir.join(format!("t.{ext}"));

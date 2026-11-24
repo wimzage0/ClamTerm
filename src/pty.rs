@@ -63,7 +63,7 @@ pub fn spawn(shell: &str, ws: &libc::winsize) -> io::Result<Pty> {
     cmd.stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave))
-        .env("ALTERM", "1");
+        .env("CLAMTERM", "1");
     unsafe {
         cmd.pre_exec(|| {
             // New session, with the PTY as its controlling terminal, so job

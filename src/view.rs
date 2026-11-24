@@ -34,6 +34,7 @@ const HINTS: &[(&[Cmd], &str)] = &[
     (&[Cmd::Insert], "insert"),
     (&[Cmd::ToggleHidden], "hidden"),
     (&[Cmd::Home], "home"),
+    (&[Cmd::Search], "search"),
     (&[Cmd::Clear], "close"),
 ];
 
@@ -86,7 +87,12 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, gfx: &mut Gfx, rows: u16, cols
     };
     let marked_width = marked.len().min(cols);
     out.push_str(HEADER);
-    out.push_str(&fit_tail(&format!(" {}", tilde_path(&panel.dir)), cols - marked_width));
+    let title = if panel.in_search() {
+        format!(" search folders you've visited ({} indexed)", panel.total())
+    } else {
+        format!(" {}", tilde_path(&panel.dir))
+    };
+    out.push_str(&fit_tail(&title, cols - marked_width));
     out.push_str(RESET);
     cell(&mut out, MARK, &marked, marked_width);
     if rows < 3 {
@@ -116,7 +122,21 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, gfx: &mut Gfx, rows: u16, cols
                     cell(&mut out, cursor, " ", 1.min(left));
                 }
                 let style = format!("{}{cursor}", entry_style(e));
-                cell(&mut out, &style, &entry_label(e), left.saturating_sub(1));
+                if let Some(w) = e.weight {
+                    // Search result: the full path, keeping its end (the
+                    // folder's own name) visible, then its weight on the right.
+                    let w = format!(" {:>5} ", format_weight(w));
+                    let w_width = if left > w.len() + 10 { w.len() } else { 0 };
+                    out.push_str(&style);
+                    out.push_str(&fit_tail(&entry_label(e), left.saturating_sub(1 + w_width)));
+                    out.push_str(RESET);
+                    cell(&mut out, &format!("{DIM}{cursor}"), &w, w_width);
+                } else {
+                    cell(&mut out, &style, &entry_label(e), left.saturating_sub(1));
+                }
+            }
+            None if row == 0 && panel.total() == 0 && panel.in_search() => {
+                cell(&mut out, DIM, "  no folders indexed yet: cd around and they'll show up here", left)
             }
             None if row == 0 && panel.total() == 0 => cell(&mut out, DIM, "  (empty)", left),
             None if row == 0 && panel.len() == 0 => cell(&mut out, DIM, "  (no matches)", left),
@@ -134,9 +154,15 @@ pub fn render(panel: &mut Panel, keymap: &Keymap, gfx: &mut Gfx, rows: u16, cols
     goto(&mut out, rows - 1);
     if let Some(msg) = &panel.message {
         cell(&mut out, MESSAGE, &format!(" {msg}"), cols);
+    } else if panel.in_search() && panel.filter.is_empty() {
+        cell(&mut out, FOOTER, " search: type part of a folder's path  \u{2502} \u{23ce} cd  tab browse  esc back", cols);
     } else if !panel.filter.is_empty() {
-        let prompt = format!(" / {}\u{2588}", panel.filter);
-        let hint = format!(" {}/{}  \u{23ce} open  tab into  esc clear ", panel.len(), panel.total());
+        let (prompt, hint) = if panel.in_search() {
+            (" search / ", format!(" {}/{}  \u{23ce} cd  tab browse  esc clear ", panel.len(), panel.total()))
+        } else {
+            (" / ", format!(" {}/{}  \u{23ce} open  tab into  esc clear ", panel.len(), panel.total()))
+        };
+        let prompt = format!("{prompt}{}\u{2588}", panel.filter);
         let hint_width = UnicodeWidthStr::width(hint.as_str()).min(cols.saturating_sub(10));
         cell(&mut out, "", &prompt, cols - hint_width);
         cell(&mut out, DIM, &hint, hint_width);
@@ -235,6 +261,22 @@ fn media_lines(
         }
     }
     (lines, image)
+}
+
+/// A frecency weight in at most five columns: "0.5", "12.3", "840", "1.2k".
+fn format_weight(w: f64) -> String {
+    if w < 100.0 {
+        format!("{w:.1}")
+    } else if w < 1_000.0 {
+        format!("{w:.0}")
+    } else if w < 99_950.0 {
+        format!("{:.1}k", w / 1_000.0)
+    } else if w < 999_500.0 {
+        format!("{:.0}k", w / 1_000.0)
+    } else {
+        // Can't happen with the rank cap, but never overflow the column.
+        "1M+".into()
+    }
 }
 
 fn entry_style(e: &Entry) -> &'static str {
@@ -363,6 +405,16 @@ mod tests {
         assert!(h.contains("alt+ n/k move "), "{h}");
         assert!(!h.contains("insert"), "{h}");
         assert!(h.contains("ctrl+g close"), "{h}");
+    }
+
+    #[test]
+    fn weights_fit_five_columns() {
+        for (w, s) in [(0.25, "0.2"), (0.5, "0.5"), (12.34, "12.3"), (99.94, "99.9"), (840.0, "840"), (1234.0, "1.2k"), (40_000.0, "40.0k"), (250_000.0, "250k")] {
+            assert_eq!(format_weight(w), s);
+        }
+        for w in [0.0, 1.0, 99.99, 999.4, 99_949.0, 99_999_999.0] {
+            assert!(format_weight(w).len() <= 5, "{w}: {}", format_weight(w));
+        }
     }
 
     #[test]

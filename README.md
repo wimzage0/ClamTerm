@@ -1,16 +1,17 @@
-# alterm
+# ClamTerm
 
 A terminal that doubles as a keyboard-driven file manager.
 
-alterm runs your normal shell and gets out of the way: every keystroke goes
+ClamTerm runs your normal shell and gets out of the way: every keystroke goes
 straight to bash, vim, htop or whatever is running. Press **Alt+m** and a
 full-screen file panel opens at the shell's current folder. Type to filter,
 preview files (including images and PDFs), then cd the shell there, open a file
-in your editor, or drop paths onto the command line. Your shell's screen and
-scrollback come back untouched when the panel closes.
+in your editor, or drop paths onto the command line. Press **Alt+r** to jump
+to any folder you've been to before, ranked by how much you use it. Your
+shell's screen and scrollback come back untouched when the panel closes.
 
 ```
- ~/Documents/dev/alterm                                               2 marked
+ ~/Documents/dev/clamterm                                               2 marked
  src/                          │ PNG image · 1280×720 · 34.1 K
  target/                       │
 *Cargo.lock                    │   ┌──────────────────────┐
@@ -19,23 +20,35 @@ scrollback come back untouched when the panel closes.
  / rea█                                          1/5  ⏎ open  tab into  esc clear
 ```
 
+```
+ search folders you've visited (42 indexed)
+ ~/Documents/dev/clamterm/                 12.0 │ src/
+ ~/Documents/dev/clamterm/src/              4.0 │ Cargo.lock
+ ~/Documents/dev/image-parser/              2.0 │ Cargo.toml
+ search / clam█                       3/42  ⏎ cd  tab browse  esc clear
+```
+
 It's a small Rust program (two dependencies: `libc` and `unicode-width`) that
 runs inside your existing terminal emulator. It doesn't replace it.
 
 ## Features
 
 - **Feels like a normal terminal.** The shell runs on its own pseudo-terminal;
-  alterm only intercepts its own hotkey. Full-screen programs (vim, less, htop)
-  get every key, Alt+m included.
+  ClamTerm only intercepts its two hotkeys, Alt+m and Alt+r. Full-screen
+  programs (vim, less, htop) get every key, those two included.
 - **Type-to-filter file panel.** Folders first, case-insensitive sorting,
   colors for folders, symlinks and executables, hidden files on demand.
+- **Jump to folders you use.** Alt+r searches every folder you've been to,
+  ranked by how often and how recently you visit (like zoxide), with each
+  folder's weight shown next to it. Nothing crawls the disk: folders are
+  indexed as you visit them.
 - **Previews.** Folder contents, the start of text files (JSON, code, logs…),
   and images, SVGs, PDFs and videos drawn in the terminal on Ghostty, kitty
   and WezTerm.
 - **Acts on your shell.** cd the shell to a folder, open a file in
   `$VISUAL`/`$EDITOR`, type quoted paths into the command line, or open
   anything in its default desktop app.
-- **Configurable keys** in `~/.config/alterm/keys.toml`, picked up without
+- **Configurable keys** in `~/.config/clamterm/keys.toml`, picked up without
   restarting.
 
 ## Requirements
@@ -52,50 +65,66 @@ runs inside your existing terminal emulator. It doesn't replace it.
 ## Install
 
 ```bash
-git clone <this repo> ~/Documents/dev/alterm
-cd ~/Documents/dev/alterm
+git clone <this repo> ~/Documents/dev/clamterm
+cd ~/Documents/dev/clamterm
 cargo install --path . --locked
 ```
 
-This puts the binary at `~/.cargo/bin/alterm` (make sure `~/.cargo/bin` is on
-your `PATH`). Run `alterm` in any terminal to try it, and `exit` to leave.
+This puts the binary at `~/.cargo/bin/clamterm` (make sure `~/.cargo/bin` is on
+your `PATH`). Run `clamterm` in any terminal to try it, and `exit` to leave.
 
 To update after pulling or editing the code, run the same `cargo install`
 command again. Already-open terminals keep the old version until reopened.
+
+### Coming from alterm
+
+ClamTerm used to be called alterm. Your folder index comes along on its own:
+the first time ClamTerm starts without an index, it copies
+`~/.local/share/alterm/dirs` (it doesn't move it, so open alterm windows keep
+working). Everything else uses the new name, so:
+
+- Install ClamTerm as above, then `cargo uninstall alterm`.
+- Replace `alterm-session` with `clamterm-session` (below) and point Ghostty's
+  `command` at it.
+- In `.bashrc`, check `$CLAMTERM` instead of `$ALTERM`; rename `ALTERM_IMAGES` /
+  `ALTERM_SKIP` to `CLAMTERM_IMAGES` / `CLAMTERM_SKIP` wherever you set them.
+- Move `~/.config/alterm/keys.toml` to `~/.config/clamterm/keys.toml` if you
+  have one.
+- Once no alterm windows are left, `~/.local/share/alterm/` can be deleted.
 
 ## Make it your default terminal session
 
 ### Ghostty
 
-1. Create a small launcher, `~/.local/bin/alterm-session`, that falls back to
-   plain bash if alterm is ever missing, so a broken install can't leave you
+1. Create a small launcher, `~/.local/bin/clamterm-session`, that falls back to
+   plain bash if ClamTerm is ever missing, so a broken install can't leave you
    without a terminal:
 
    ```sh
    #!/bin/sh
-   # Ghostty's `command`: start alterm, or a plain shell if alterm isn't
-   # installed. Set ALTERM_SKIP=1 (e.g. `ALTERM_SKIP=1 ghostty`) to skip it.
-   alterm="$HOME/.cargo/bin/alterm"
-   if [ -z "$ALTERM_SKIP" ] && [ -x "$alterm" ]; then
-       exec "$alterm"
+   # Ghostty's `command`: start ClamTerm, or a plain shell if it isn't
+   # installed. Set CLAMTERM_SKIP=1 (e.g. `CLAMTERM_SKIP=1 ghostty`) to skip it.
+   clamterm="$HOME/.cargo/bin/clamterm"
+   if [ -z "$CLAMTERM_SKIP" ] && [ -x "$clamterm" ]; then
+       exec "$clamterm"
    fi
    exec "${SHELL:-/bin/bash}"
    ```
 
    ```bash
-   chmod +x ~/.local/bin/alterm-session
+   chmod +x ~/.local/bin/clamterm-session
    ```
 
 2. Point Ghostty at it in `~/.config/ghostty/config.ghostty` (or
    `~/.config/ghostty/config`), using your own home path:
 
    ```
-   command = direct:/home/YOU/.local/bin/alterm-session
+   command = direct:/home/YOU/.local/bin/clamterm-session
    ```
 
    Check the file with `ghostty +validate-config`, then reload Ghostty's
    config (**Ctrl+Shift+,**) or restart Ghostty. Every new window and tab now
-   starts in alterm. `echo $ALTERM` prints `1` inside it.
+   starts in ClamTerm. `echo $CLAMTERM` prints `1` inside it.
 
 3. Restore Ghostty's shell integration (new tabs opening in the current
    folder, jumping between prompts, cursor shape, window titles). Ghostty only
@@ -103,8 +132,8 @@ command again. Already-open terminals keep the old version until reopened.
    `~/.bashrc`, after the "not interactive, return" check:
 
    ```bash
-   # Ghostty shell integration inside alterm. Plain bash in Ghostty skips this.
-   if [ -n "$ALTERM" ] && [ -n "$GHOSTTY_RESOURCES_DIR" ]; then
+   # Ghostty shell integration inside ClamTerm. Plain bash in Ghostty skips this.
+   if [ -n "$CLAMTERM" ] && [ -n "$GHOSTTY_RESOURCES_DIR" ]; then
        : "${GHOSTTY_SHELL_FEATURES:=cursor,title,path}"
        export GHOSTTY_SHELL_FEATURES
        builtin source "$GHOSTTY_RESOURCES_DIR/shell-integration/bash/ghostty.bash"
@@ -114,7 +143,7 @@ command again. Already-open terminals keep the old version until reopened.
 ### Other terminals
 
 Any terminal that can run a custom command works: point it at
-`~/.local/bin/alterm-session`. In GNOME Terminal that's Preferences → your
+`~/.local/bin/clamterm-session`. In GNOME Terminal that's Preferences → your
 profile → Command → "Run a custom command instead of my shell". Image previews
 need a kitty-graphics terminal; elsewhere you get the info line (and PDF text).
 
@@ -130,9 +159,11 @@ should see `^[m`.
 | Key | Action |
 |---|---|
 | Alt+m | Open the file panel at the shell's current folder |
+| Alt+r | Open the panel searching folders you've visited (see [Folder search](#folder-search)) |
 
 Everything else goes to the shell unchanged. While a full-screen program is
-running (vim, less, htop…) even Alt+m goes to that program.
+running (vim, less, htop…) even Alt+m and Alt+r go to that program. (Alt+r
+replaces bash's rarely used `revert-line`.)
 
 ### In the panel
 
@@ -157,6 +188,7 @@ The panel is always filtering: **plain characters narrow the list**
 | PgUp / PgDn | Page up / down |
 | Alt+. | Show / hide hidden files |
 | Alt+~ | Go to your home folder |
+| Alt+r | Search visited folders; press again to go back to browsing |
 | Alt+m, Alt+q | Close without changing anything |
 
 The footer lists the current bindings, and switches to the filter text with a
@@ -178,6 +210,47 @@ How commands reach the shell:
   program. Alt+i still works, so you can type paths into a REPL prompt.
 - **Shell output while the panel is open** is held and shown when it closes.
 
+### Folder search
+
+ClamTerm keeps an index of the folders you visit, so finding one never means
+walking your whole disk:
+
+- Every time the shell's folder changes (a `cd`, `pushd`, a script that cds…)
+  the new folder gets a visit. Browsing into a folder in the panel counts as
+  half a visit. `/` and your home folder aren't indexed.
+- Results are ranked by **frecency**: visit count, weighted by recency (×4 if
+  you were there in the last hour, ×2 today, ×½ this week, ×¼ older).
+- Type part of the path to narrow the results. Every word must appear in the
+  path, in that order (`dev clam` finds `~/Documents/dev/clamterm`). Folders
+  whose own name matches the last word rank higher, more so when the name
+  starts with it, so `dev` puts `~/Documents/dev` ahead of folders inside it.
+
+Each result shows its weight (its frecency) on the right, shortened to fit:
+`0.5`, `12.3`, `840`, `1.2k`. With a query, the order also counts how well the
+name matches, so a folder can rank above a heavier one whose name doesn't match
+the last word. In a narrow window the path is cut from the left so the
+folder's own name and the weight stay visible.
+
+In search mode:
+
+| Key | Action |
+|---|---|
+| typing | Narrow the results; the best match is highlighted |
+| Enter, Alt+c | cd the shell there and close |
+| Tab, Alt+l, → | Browse into that folder in the panel |
+| Esc | Clear the query; with an empty query, back to browsing |
+| Backspace on an empty query, Alt+r, Alt+h, ← | Back to browsing |
+| Alt+p, Alt+i, Alt+Space | Open in file manager, insert the path, mark: as usual |
+
+The index is a plain text file, `~/.local/share/clamterm/dirs` (or
+`$XDG_DATA_HOME/clamterm/dirs`): one line per folder with its rank, last visit
+time and path. Every ClamTerm window shares it: saving merges with what's on
+disk, so tabs don't overwrite each other. Folders that no longer exist drop out
+the next time you search, and once the ranks add up to more than 10 000 they
+are all scaled down and the faintest dropped, so old habits fade. Delete the
+file to start over. It starts empty (or with your old alterm index) and fills
+as you move around.
+
 ### Previews
 
 | File | Preview |
@@ -191,23 +264,24 @@ How commands reach the shell:
 | Other binaries | `binary file, 1.2 M` |
 
 Thumbnails are made in the background (only for the file you stop on, 10 s
-limit per file) and kept in `$XDG_RUNTIME_DIR/alterm-<pid>/`, deleted on exit.
+limit per file) and kept in `$XDG_RUNTIME_DIR/clamterm-<pid>/`, deleted on exit.
 Images are fitted to the pane and never drawn larger than their real size.
 
 ## Configuration
 
-Keybindings live in `~/.config/alterm/keys.toml` (or
-`$XDG_CONFIG_HOME/alterm/keys.toml`; `alterm --keys-path` prints it). Start
+Keybindings live in `~/.config/clamterm/keys.toml` (or
+`$XDG_CONFIG_HOME/clamterm/keys.toml`; `clamterm --keys-path` prints it). Start
 from the defaults, which come with a comment on every action:
 
 ```bash
-mkdir -p ~/.config/alterm
-alterm --print-keys > ~/.config/alterm/keys.toml
+mkdir -p ~/.config/clamterm
+clamterm --print-keys > ~/.config/clamterm/keys.toml
 ```
 
 ```toml
 [shell]
 open_panel = ["alt+m"]
+search = ["alt+r"]
 
 [panel]
 down = ["alt+n", "down"]   # replaces the default ["alt+j", "down"]
@@ -225,22 +299,23 @@ insert = []                # unbinds it
   typing them (in the shell, or into the panel's filter).
 - Changes apply the next time the panel opens ("reloaded keys.toml" in the
   footer). Mistakes are skipped with a warning: in the footer, or above the
-  first prompt when alterm starts.
+  first prompt when ClamTerm starts.
 
 ### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `ALTERM` | Set to `1` inside alterm (useful in `.bashrc`) |
-| `ALTERM_IMAGES` | `1` / `0` forces image previews on / off. Default: on for Ghostty, kitty and WezTerm, off inside tmux/screen |
-| `ALTERM_SKIP` | Read by the launcher script: start a plain shell instead |
-| `SHELL` | The shell alterm runs (default `/bin/bash`) |
+| `CLAMTERM` | Set to `1` inside ClamTerm (useful in `.bashrc`) |
+| `CLAMTERM_IMAGES` | `1` / `0` forces image previews on / off. Default: on for Ghostty, kitty and WezTerm, off inside tmux/screen |
+| `CLAMTERM_SKIP` | Read by the launcher script: start a plain shell instead |
+| `SHELL` | The shell ClamTerm runs (default `/bin/bash`) |
 | `VISUAL`, `EDITOR` | The editor for Enter / Alt+l on files (read by your shell) |
-| `XDG_CONFIG_HOME` | Where `alterm/keys.toml` is looked up |
+| `XDG_CONFIG_HOME` | Where `clamterm/keys.toml` is looked up |
+| `XDG_DATA_HOME` | Where the folder index (`clamterm/dirs`) is kept |
 
 ## How it works
 
-alterm puts your terminal in raw mode, starts `$SHELL` on a fresh
+ClamTerm puts your terminal in raw mode, starts `$SHELL` on a fresh
 pseudo-terminal, and copies bytes both ways. Input is scanned for the hotkey
 without being re-encoded, so the shell sees exactly what the terminal sent.
 Alt+x arrives as `ESC x` within one read; a lone `ESC` at the end of a read is
@@ -263,6 +338,7 @@ restored on exit and on panic.
 | `src/panel.rs` | File panel model: listing, filter, marks, keys to actions (no terminal I/O) |
 | `src/view.rs` | Drawing the panel (wide characters, truncation, footer hints) |
 | `src/media.rs` | Media detection, image sizes, background thumbnails, kitty graphics |
+| `src/dirindex.rs` | The visited-folder index: frecency, matching, saving and merging |
 | `src/shell.rs` | Quoting and the cd / editor / insert keystrokes |
 | `src/desktop.rs` | `xdg-open` for Alt+p |
 
@@ -277,14 +353,15 @@ cargo test
 ```
 
 The unit tests cover key parsing, hotkey detection, alt-screen tracking, shell
-quoting (round-tripped through a real `sh`), the panel model, the TOML parser,
-image header parsing (checked against files made by ffmpeg), and layout.
+quoting (round-tripped through a real `sh`), the panel model, folder search
+ranking and index merging, the TOML parser, image header parsing (checked
+against files made by ffmpeg), and layout.
 
 For end-to-end checks, run the binary inside tmux and drive it with
 `tmux send-keys`:
 
 ```bash
-tmux new-session -d -s t -x 120 -y 30 "SHELL=/bin/bash ./target/release/alterm"
+tmux new-session -d -s t -x 120 -y 30 "SHELL=/bin/bash ./target/release/clamterm"
 tmux send-keys -t t M-m          # open the panel
 tmux send-keys -t t src Enter    # filter to src/, cd there and close
 tmux send-keys -t t pwd Enter
@@ -293,7 +370,7 @@ tmux kill-session -t t
 ```
 
 tmux doesn't pass images through, so previews fall back to the text version
-there. `ALTERM_IMAGES=1` forces the image path, to check thumbnails get made.
+there. `CLAMTERM_IMAGES=1` forces the image path, to check thumbnails get made.
 
 ## Limitations
 

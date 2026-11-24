@@ -53,14 +53,22 @@ runs inside your existing terminal emulator. It doesn't replace it.
 
 ## Requirements
 
-- **Linux.** The shell's current folder is read from `/proc`.
-- **Rust 1.70 or newer** to build.
-- **Optional, for previews:** a terminal with the kitty graphics protocol
-  (Ghostty, kitty or WezTerm) plus `gdk-pixbuf-thumbnailer` (images, SVG),
-  `pdftoppm`/`pdfinfo`/`pdftotext` from poppler-utils (PDF), and
-  `ffmpeg`/`ffprobe` (video). These are all present on a stock Pop!_OS desktop.
+- **Linux or macOS.**
+- **Rust 1.70 or newer** to build ([rustup](https://rustup.rs)). On macOS also
+  the Xcode command line tools, for the linker: `xcode-select --install`.
+- **Optional, for image previews:** a terminal with the kitty graphics protocol
+  (Ghostty, kitty or WezTerm). Thumbnails come from tools that are usually
+  already there:
+  - **Linux:** `gdk-pixbuf-thumbnailer` (images, SVG), `pdftoppm`/`pdfinfo`/
+    `pdftotext` from poppler-utils (PDF), `ffmpeg`/`ffprobe` (video). All
+    present on a stock Pop!_OS desktop.
+  - **macOS:** Quick Look (`qlmanage`), `sips` and Spotlight (`mdls`), all
+    built in. `brew install poppler` adds PDF text in terminals without
+    graphics.
+
   Anything missing just means a simpler preview for that file type.
-- **Optional:** `xdg-open` (from xdg-utils) for Alt+p.
+- **Optional:** `xdg-open` (from xdg-utils) for Alt+p on Linux; macOS uses
+  `open`.
 
 ## Install
 
@@ -147,6 +155,38 @@ Any terminal that can run a custom command works: point it at
 profile → Command → "Run a custom command instead of my shell". Image previews
 need a kitty-graphics terminal; elsewhere you get the info line (and PDF text).
 
+### macOS
+
+macOS keyboards have no Alt key: **ClamTerm's Alt is ⌥ Option**, and the
+footer shows ⌥ instead of `alt+`. (⌘ can't be used: terminals keep ⌘ keys for
+themselves and macOS, so they never reach programs.) The terminal has to send
+Option as Alt:
+
+- **Ghostty:** add `macos-option-as-alt = left` to the config. The left ⌥
+  then acts as Alt for ClamTerm while the right ⌥ still types special
+  characters (å, ø, @, …). Use `true` for both.
+- **Terminal.app:** Settings → Profiles → Keyboard → "Use Option as Meta key".
+- **iTerm2:** Settings → Profiles → Keys → Left Option key: "Esc+".
+
+The setup steps above work the same, with two differences:
+
+- Home is `/Users/YOU`, so Ghostty's line is
+  `command = direct:/Users/YOU/.local/bin/clamterm-session`.
+- The default shell is **zsh**, so the shell-integration snippet goes in
+  `~/.zshrc` instead:
+
+  ```zsh
+  # Ghostty shell integration inside ClamTerm. Plain zsh in Ghostty skips this.
+  if [[ -n "$CLAMTERM" && -n "$GHOSTTY_RESOURCES_DIR" ]]; then
+      source "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration"
+  fi
+  # Keep ClamTerm's cd / editor commands (they start with a space) out of history.
+  setopt HIST_IGNORE_SPACE
+  ```
+
+Files live where they do on Linux: `~/.config/clamterm/keys.toml` and
+`~/.local/share/clamterm/dirs`.
+
 **If Alt+m opens a menu instead of the panel** (GNOME Terminal), turn off
 Preferences → General → "Enable mnemonics" and "Enable the menu accelerator
 key". To check what your terminal sends, run `cat -v` and press Alt+m: you
@@ -169,6 +209,7 @@ replaces bash's rarely used `revert-line`.)
 
 The panel is always filtering: **plain characters narrow the list**
 (case-insensitive substring), so commands use Alt or keys that don't type.
+On macOS, read Alt as ⌥ Option throughout.
 
 | Key | Action |
 |---|---|
@@ -295,6 +336,7 @@ insert = []                # unbinds it
 - Key names: a character with a modifier (`"alt+j"`, `"alt+G"`, `"ctrl+u"`) or
   a named key (`enter tab backspace delete insert esc space up down left right
   home end pageup pagedown`), with optional `alt+`, `ctrl+`, `shift+`.
+  `opt+` / `option+` are the same as `alt+`.
 - Plain characters can't be bound in either section, since they'd stop you
   typing them (in the shell, or into the panel's filter).
 - Changes apply the next time the panel opens ("reloaded keys.toml" in the
@@ -316,7 +358,8 @@ insert = []                # unbinds it
 ## How it works
 
 ClamTerm puts your terminal in raw mode, starts `$SHELL` on a fresh
-pseudo-terminal, and copies bytes both ways. Input is scanned for the hotkey
+pseudo-terminal, and copies bytes both ways. The shell's current folder comes
+from `/proc/<pid>/cwd` on Linux and `proc_pidinfo` on macOS. Input is scanned for the hotkey
 without being re-encoded, so the shell sees exactly what the terminal sent.
 Alt+x arrives as `ESC x` within one read; a lone `ESC` at the end of a read is
 the Escape key. Output is scanned for alternate-screen switches (`ESC[?1049h`,
@@ -330,17 +373,17 @@ restored on exit and on panic.
 |---|---|
 | `src/main.rs` | Event loop: shell output, keyboard, resize, thumbnail wakeups. Carries out panel actions |
 | `src/sys.rs` | Raw mode, window size, SIGWINCH, fd helpers, panel screen enter/leave |
-| `src/pty.rs` | Spawning the shell on a PTY, its cwd and whether it's busy |
+| `src/pty.rs` | Spawning the shell on a PTY, its cwd (Linux and macOS) and whether it's busy |
 | `src/input.rs` | Bytes to keys; hotkey scanning (ignores bracketed paste) |
 | `src/screen.rs` | Tracking the shell program's alternate screen |
 | `src/keymap.rs` | Actions, default keys, keys.toml loading |
 | `src/tinytoml.rs` | The small TOML subset keys.toml uses |
 | `src/panel.rs` | File panel model: listing, filter, marks, keys to actions (no terminal I/O) |
 | `src/view.rs` | Drawing the panel (wide characters, truncation, footer hints) |
-| `src/media.rs` | Media detection, image sizes, background thumbnails, kitty graphics |
+| `src/media.rs` | Media detection, image sizes, background thumbnails (Linux tools or Quick Look), kitty graphics |
 | `src/dirindex.rs` | The visited-folder index: frecency, matching, saving and merging |
 | `src/shell.rs` | Quoting and the cd / editor / insert keystrokes |
-| `src/desktop.rs` | `xdg-open` for Alt+p |
+| `src/desktop.rs` | `xdg-open` / `open` for Alt+p |
 
 The panel's model (`panel.rs`, `keymap.rs`) is kept apart from rendering and
 I/O so it could later move into a standalone terminal emulator.
@@ -350,6 +393,13 @@ I/O so it could later move into a standalone terminal emulator.
 ```bash
 cargo build --release
 cargo test
+```
+
+To check the macOS build from Linux (compiles everything, no linking):
+
+```bash
+rustup target add aarch64-apple-darwin
+cargo check --target aarch64-apple-darwin --all-targets
 ```
 
 The unit tests cover key parsing, hotkey detection, alt-screen tracking, shell
@@ -374,9 +424,12 @@ there. `CLAMTERM_IMAGES=1` forces the image path, to check thumbnails get made.
 
 ## Limitations
 
-- Linux only (`/proc/<pid>/cwd`).
+- Linux and macOS only (it needs a way to read another process's folder).
 - cd, the editor and Alt+i type into the shell's line editor; they're tested
-  with bash. Other shells with emacs-style Ctrl+E/Ctrl+U should work too.
+  with bash. Other shells using emacs-style keys (zsh's default) should work;
+  vi-mode line editing doesn't.
+- On macOS, Alt is ⌥ Option and the terminal must send it as Alt (see
+  [macOS](#macos)); ⌘ shortcuts can't reach ClamTerm.
 - Inside the panel, Alt+Space may be taken by your desktop (window menu);
   Ctrl+Space also marks.
 - Left and Right Alt can't be told apart: terminals send the same bytes.

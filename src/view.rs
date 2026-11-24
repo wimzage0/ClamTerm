@@ -38,8 +38,12 @@ const HINTS: &[(&[Cmd], &str)] = &[
     (&[Cmd::Clear], "close"),
 ];
 
+/// How the Alt modifier is shown: macOS keyboards call it Option.
+const ALT_LABEL: &str = if cfg!(target_os = "macos") { "\u{2325}" } else { "alt+" };
+
 /// Footer text built from the current bindings, so rebinding keeps it true.
-/// Alt bindings are grouped behind one "alt+" so the line stays short.
+/// Alt bindings are grouped behind one "alt+" (macOS: "⌥", the Option key
+/// the terminal sends as Alt) so the line stays short.
 fn hints(keymap: &Keymap) -> String {
     let (mut alt, mut other) = (Vec::new(), Vec::new());
     for (cmds, label) in HINTS {
@@ -65,7 +69,7 @@ fn hints(keymap: &Keymap) -> String {
     }
     let mut out = String::from(" type to filter");
     if !alt.is_empty() {
-        out.push_str(&format!("  \u{2502} alt+ {}", alt.join("  ")));
+        out.push_str(&format!("  \u{2502} {ALT_LABEL} {}", alt.join("  ")));
     }
     if !other.is_empty() {
         out.push_str(&format!("  \u{2502} {}", other.join("  ")));
@@ -398,11 +402,12 @@ mod tests {
     #[test]
     fn hints_follow_bindings() {
         let h = hints(&Keymap::default());
-        assert!(h.starts_with(" type to filter  \u{2502} alt+ j/k move  h/l out/in  p open in app "), "{h}");
+        let start = format!(" type to filter  \u{2502} {ALT_LABEL} j/k move  h/l out/in  p open in app ");
+        assert!(h.starts_with(&start), "{h}");
         assert!(h.contains("\u{2502} \u{23ce} cd/edit  esc close"), "{h}");
         let (k, _) = Keymap::from_toml("[panel]\ndown = \"alt+n\"\ninsert = []\nclear = \"ctrl+g\"\n");
         let h = hints(&k);
-        assert!(h.contains("alt+ n/k move "), "{h}");
+        assert!(h.contains(&format!("{ALT_LABEL} n/k move ")), "{h}");
         assert!(!h.contains("insert"), "{h}");
         assert!(h.contains("ctrl+g close"), "{h}");
     }

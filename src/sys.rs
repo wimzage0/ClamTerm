@@ -87,14 +87,15 @@ pub fn install_panic_hook() {
 pub fn get_winsize(fd: RawFd) -> io::Result<libc::winsize> {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
-        cvt(libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws))?;
+        // `as _`: the request's integer type differs between Linux and macOS.
+        cvt(libc::ioctl(fd, libc::TIOCGWINSZ as _, &mut ws))?;
         Ok(ws)
     }
 }
 
 pub fn set_winsize(fd: RawFd, ws: &libc::winsize) -> io::Result<()> {
     unsafe {
-        cvt(libc::ioctl(fd, libc::TIOCSWINSZ, ws))?;
+        cvt(libc::ioctl(fd, libc::TIOCSWINSZ as _, ws))?;
     }
     Ok(())
 }
@@ -116,26 +117,30 @@ extern "C" fn on_sigwinch(_: libc::c_int) {
 
 /// Install a SIGWINCH handler and return the read end of its self-pipe.
 pub fn watch_resize() -> io::Result<RawFd> {
+    let (rd, wr) = pipe()?;
     unsafe {
-        let mut fds = [0; 2];
-        cvt(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK))?;
-        WINCH_WRITE_FD.store(fds[1], Ordering::Relaxed);
+        WINCH_WRITE_FD.store(wr, Ordering::Relaxed);
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = on_sigwinch as extern "C" fn(libc::c_int) as usize;
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut sa.sa_mask);
         cvt(libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut()))?;
-        Ok(fds[0])
     }
+    Ok(rd)
 }
 
-/// A close-on-exec pipe whose read end is non-blocking: (read, write).
+/// A non-blocking, close-on-exec pipe: (read, write). Used for wakeups, so
+/// a full pipe just drops the byte instead of blocking the writer. (Plain
+/// `pipe` + `fcntl`, since macOS has no `pipe2`.)
 pub fn pipe() -> io::Result<(RawFd, RawFd)> {
     let mut fds = [0; 2];
     unsafe {
-        cvt(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC))?;
+        cvt(libc::pipe(fds.as_mut_ptr()))?;
     }
-    set_nonblocking(fds[0])?;
+    for fd in fds {
+        set_cloexec(fd)?;
+        set_nonblocking(fd)?;
+    }
     Ok((fds[0], fds[1]))
 }
 

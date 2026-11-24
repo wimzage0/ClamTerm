@@ -5,13 +5,17 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Open `path` with its default application via xdg-open, without blocking:
-/// a folder opens in the file manager, a file in whatever handles its type.
+/// The desktop's "open with the default app" command.
+const OPENER: &str = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+
+/// Open `path` with its default application (xdg-open, or `open` on
+/// macOS) without blocking: a folder opens in the file manager (Finder), a
+/// file in whatever handles its type.
 pub fn open(path: PathBuf) {
     // Waiting happens on a thread so the panel stays responsive and no
     // zombie process is left behind.
     std::thread::spawn(move || {
-        let mut cmd = Command::new("xdg-open");
+        let mut cmd = Command::new(OPENER);
         cmd.arg(&path);
         // No stdio (it must not draw over the panel) and its own session (it
         // must not die with the terminal).

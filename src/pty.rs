@@ -32,8 +32,31 @@ impl Pty {
     }
 
     /// The shell's current directory (Linux: `/proc/<pid>/cwd`).
+    #[cfg(not(target_os = "macos"))]
     pub fn cwd(&self) -> io::Result<PathBuf> {
         std::fs::read_link(format!("/proc/{}/cwd", self.child.id()))
+    }
+
+    /// The shell's current directory (macOS: `proc_pidinfo`, as `lsof` does).
+    #[cfg(target_os = "macos")]
+    pub fn cwd(&self) -> io::Result<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe {
+            let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+            let n = libc::proc_pidinfo(
+                self.child.id() as libc::c_int,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                &mut info as *mut libc::proc_vnodepathinfo as *mut libc::c_void,
+                size,
+            );
+            if n != size {
+                return Err(io::Error::last_os_error());
+            }
+            let path = std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr() as *const libc::c_char);
+            Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+        }
     }
 }
 
@@ -45,7 +68,8 @@ pub fn spawn(shell: &str, ws: &libc::winsize) -> io::Result<Pty> {
             &mut m,
             &mut s,
             std::ptr::null_mut(),
-            std::ptr::null(),
+            // `*mut` coerces to the `*const` Linux takes; macOS wants `*mut`.
+            std::ptr::null_mut(),
             ws as *const libc::winsize as *mut libc::winsize,
         )
     };
@@ -71,7 +95,7 @@ pub fn spawn(shell: &str, ws: &libc::winsize) -> io::Result<Pty> {
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())

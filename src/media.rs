@@ -368,22 +368,27 @@ fn make_thumb(src: &Path, kind: MediaKind, out: &Path, graphics: bool) -> Result
     match kind {
         MediaKind::Pdf => {
             let info = run("pdfinfo", &[src.as_os_str()]).unwrap_or_default();
-            thumb.info = info
+            let pages = info
                 .lines()
                 .find_map(|l| l.strip_prefix("Pages:"))
-                .map(|n| format!("{} pages", n.trim()))
-                .map(|s| if s == "1 pages" { "1 page".into() } else { s });
+                .map(|n| n.trim().to_string())
+                .or_else(|| spotlight(src, "kMDItemNumberOfPages"));
+            thumb.info = pages.map(|n| if n == "1" { "1 page".into() } else { format!("{n} pages") });
             if !graphics {
+                // Without poppler (stock macOS) there's just no text.
                 let mut args = os(&["-l", "3", "-layout"]);
                 args.extend([src.as_os_str(), OsStr::new("-")]);
-                let text = run("pdftotext", &args)?;
+                let text = run("pdftotext", &args).unwrap_or_default();
                 thumb.text = text.lines().take(PDF_TEXT_LINES).map(str::to_owned).collect();
             }
         }
         MediaKind::Video => {
             let mut args = os(&["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]);
             args.push(src.as_os_str());
-            let secs = run("ffprobe", &args).ok().and_then(|s| s.trim().parse::<f64>().ok());
+            let secs = run("ffprobe", &args)
+                .ok()
+                .or_else(|| spotlight(src, "kMDItemDurationSeconds"))
+                .and_then(|s| s.trim().parse::<f64>().ok());
             thumb.info = secs.map(|s| {
                 let s = s as u64;
                 if s >= 3600 {
@@ -401,7 +406,17 @@ fn make_thumb(src: &Path, kind: MediaKind, out: &Path, graphics: bool) -> Result
 
     let size = THUMB_PX.to_string();
     let o = out.as_os_str();
+    // macOS: Quick Look renders every kind we preview; the tools below are
+    // the fallback (and the only route on Linux).
+    let quick_looked = cfg!(target_os = "macos") && quick_look(src, out, &size).is_ok();
     match kind {
+        _ if quick_looked => {}
+        MediaKind::Image(_) | MediaKind::Svg if cfg!(target_os = "macos") => {
+            let mut args = os(&["-s", "format", "png", "-Z", &size]);
+            args.push(src.as_os_str());
+            args.extend([OsStr::new("--out"), o]);
+            run("sips", &args)?;
+        }
         MediaKind::Image(_) | MediaKind::Svg => {
             let mut args = os(&["-s", &size]);
             args.extend([src.as_os_str(), o]);
@@ -433,6 +448,37 @@ fn make_thumb(src: &Path, kind: MediaKind, out: &Path, graphics: bool) -> Result
     thumb.px = image_size(&head).ok_or("preview image is unreadable")?;
     thumb.png = Some(out.to_path_buf());
     Ok(thumb)
+}
+
+/// macOS Quick Look thumbnail of `src` at `out`. qlmanage names its output
+/// after the input, so it writes into a scratch folder first.
+fn quick_look(src: &Path, out: &Path, size: &str) -> Result<(), String> {
+    let dir = out.with_extension("ql");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut args = os(&["-t", "-s", size, "-o"]);
+    args.extend([dir.as_os_str(), src.as_os_str()]);
+    let made = run("qlmanage", &args).ok().and_then(|_| {
+        std::fs::read_dir(&dir).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.extension() == Some(OsStr::new("png")))
+    });
+    let result = match made {
+        Some(png) => std::fs::rename(png, out).map_err(|e| e.to_string()),
+        None => Err("Quick Look made no thumbnail".into()),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// A Spotlight attribute (macOS `mdls`), e.g. a PDF's page count; `None`
+/// elsewhere or when Spotlight doesn't know it.
+fn spotlight(src: &Path, attr: &str) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let mut args = os(&["-name", attr, "-raw"]);
+    args.push(src.as_os_str());
+    let value = run("mdls", &args).ok()?;
+    let value = value.trim();
+    (!value.is_empty() && value != "(null)").then(|| value.to_string())
 }
 
 fn os<'a>(args: &[&'a str]) -> Vec<&'a OsStr> {

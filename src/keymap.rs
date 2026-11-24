@@ -218,7 +218,8 @@ pub fn parse_key_spec(spec: &str) -> Result<Key, String> {
     let (mut alt, mut ctrl, mut shift) = (false, false, false);
     loop {
         let lower = rest.to_ascii_lowercase();
-        let flag = if lower.starts_with("alt+") || lower.starts_with("meta+") {
+        // opt+/option+: the Mac name for the same key (with Option as Alt).
+        let flag = if ["alt+", "meta+", "opt+", "option+"].iter().any(|p| lower.starts_with(p)) {
             &mut alt
         } else if lower.starts_with("ctrl+") {
             &mut ctrl
@@ -361,6 +362,8 @@ mod tests {
         assert_eq!(parse_key_spec("G"), Ok(Key::new(Char('G'))));
         assert_eq!(parse_key_spec("alt+m"), Ok(Key::alt(Char('m'))));
         assert_eq!(parse_key_spec("Alt+M"), Ok(Key::alt(Char('M'))));
+        assert_eq!(parse_key_spec("opt+m"), Ok(Key::alt(Char('m'))));
+        assert_eq!(parse_key_spec("option+shift+tab"), Ok(Key::alt(BackTab)));
         assert_eq!(parse_key_spec("ctrl+u"), Ok(Key::new(Ctrl('u'))));
         assert_eq!(parse_key_spec("alt+ctrl+x"), Ok(Key::alt(Ctrl('x'))));
         assert_eq!(parse_key_spec("ctrl+i"), Ok(Key::new(Tab)));
